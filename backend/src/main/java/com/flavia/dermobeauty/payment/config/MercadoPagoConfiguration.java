@@ -1,0 +1,26 @@
+package com.flavia.dermobeauty.payment.config;
+
+import com.mercadopago.MercadoPagoConfig;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Configuration;
+
+import jakarta.annotation.PostConstruct;
+
+/**
+ * Configuration for Mercado Pago SDK.
+ * Initializes SDK with access token from application properties.
+ */
+@Slf4j
+@Configuration
+public class MercadoPagoConfiguration {
+
+    @Value("${mercadopago.access-token}")
+    private String accessToken;
+
+    @PostConstruct
+    public void init() {
+        MercadoPagoConfig.setAccessToken(accessToken);
+        log.info("Mercado Pago SDK configured with access token");
+    }
+}

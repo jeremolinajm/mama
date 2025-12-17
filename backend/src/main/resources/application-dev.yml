@@ -1,0 +1,59 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/dermobeauty_dev
+    username: dermobeauty
+    password: dermobeauty
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: false
+  mail:
+    host: smtp.gmail.com
+    port: 587
+    username: 'flavia.dermobeauty@gmail.com'
+    password: 'qajp ptwr gdjg uozl'
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+            required: true
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
+
+# Admin credentials (change in production!)
+admin:
+  username: admin
+  # BCrypt hash for "admin123" (verified)
+  password: $2a$10$OQlalRpvK3/0ikEa3xO62ujds5OHSF723wIXh3gIk7ca7nJmp0c9q
+
+# JWT configuration
+jwt:
+  secret: flavia-dermobeauty-jwt-secret-key-change-in-production-2024
+  expiration: 86400000 # 24 hours in milliseconds
+
+# Mercado Pago configuration
+mercadopago:
+  access-token: APP_USR-3480197543728175-092819-981988e8773a0af18511e1e610ba5f23-2719878562
+  base-url: https://flaviadermobeauty.com
+
+# Application settings
+app:
+  api-url: https://api.flaviadermobeauty.com
+  upload-dir: ./uploads
+  email:
+    from: flavia.dermobeauty@gmail.com
+    from-name: Flavia Dermobeauty
+  delivery:
+    fixed-cost: 1500.00
+
+# Logging
+logging:
+  level:
+    com.flavia.dermobeauty: DEBUG
+    org.springframework.web: INFO
+    org.hibernate.SQL: DEBUG

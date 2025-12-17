@@ -1,0 +1,2901 @@
+
+========== FILE: src/main/java/com/flavia/dermobeauty/payment/controller/MercadoPagoWebhookController.java ==========
+package com.flavia.dermobeauty.payment.controller;
+
+import com.flavia.dermobeauty.booking.application.usecase.ConfirmBookingPaymentUseCase;
+import com.flavia.dermobeauty.booking.domain.Booking;
+import com.flavia.dermobeauty.booking.domain.BookingRepository;
+import com.flavia.dermobeauty.sales.application.usecase.ConfirmOrderPaymentUseCase;
+import com.flavia.dermobeauty.sales.domain.Order;
+import com.flavia.dermobeauty.sales.domain.OrderRepository;
+import com.mercadopago.client.payment.PaymentClient;
+import com.mercadopago.exceptions.MPApiException;
+import com.mercadopago.exceptions.MPException;
+import com.mercadopago.resources.payment.Payment;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.Map;
+
+/**
+ * Controller for Mercado Pago webhook notifications.
+ * Handles payment status updates from Mercado Pago.
+ *
+ * CRITICAL: This endpoint must be publicly accessible (no authentication).
+ * Mercado Pago sends IPN notifications here when payment status changes.
+ */
+@Slf4j
+@RestController
+@RequestMapping("/api/mp")
+@RequiredArgsConstructor
+public class MercadoPagoWebhookController {
+
+    private final BookingRepository bookingRepository;
+    private final OrderRepository orderRepository;
+    private final ConfirmBookingPaymentUseCase confirmBookingPaymentUseCase;
+    private final ConfirmOrderPaymentUseCase confirmOrderPaymentUseCase;
+    private final PaymentClient paymentClient = new PaymentClient();
+
+    @PostMapping("/webhook")
+    public ResponseEntity<Void> handleWebhook(@RequestBody Map<String, Object> payload) {
+        try {
+            log.info("Received MP webhook: {}", payload);
+
+            String type = (String) payload.get("type");
+
+            if (!"payment".equals(type)) {
+                log.debug("Ignoring non-payment notification: {}", type);
+                return ResponseEntity.ok().build();
+            }
+
+            Map<String, Object> data = (Map<String, Object>) payload.get("data");
+            if (data == null) {
+                log.warn("Webhook data is null");
+                return ResponseEntity.ok().build();
+            }
+
+            String paymentIdStr = (String) data.get("id");
+            if (paymentIdStr == null) {
+                log.warn("Payment ID is null in webhook data");
+                return ResponseEntity.ok().build();
+            }
+
+            Long paymentId = Long.parseLong(paymentIdStr);
+            log.info("Processing payment notification for payment ID: {}", paymentId);
+
+            // Fetch payment details from Mercado Pago
+            Payment payment = paymentClient.get(paymentId);
+            log.info("Payment status: {}, External reference: {}",
+                    payment.getStatus(), payment.getExternalReference());
+
+            // Only process approved payments
+            if (!"approved".equals(payment.getStatus())) {
+                log.info("Payment {} not approved yet (status: {}), skipping confirmation",
+                        paymentId, payment.getStatus());
+                return ResponseEntity.ok().build();
+            }
+
+            String externalReference = payment.getExternalReference();
+            if (externalReference == null) {
+                log.warn("External reference is null for payment {}", paymentId);
+                return ResponseEntity.ok().build();
+            }
+
+            // Update payment ID in booking/order and confirm
+            if (externalReference.startsWith("BOOKING-")) {
+                confirmBookingPayment(externalReference, String.valueOf(paymentId));
+            } else if (externalReference.startsWith("ORDER-")) {
+                confirmOrderPayment(externalReference, String.valueOf(paymentId));
+            } else {
+                log.warn("Unknown external reference format: {}", externalReference);
+            }
+
+            return ResponseEntity.ok().build();
+
+        } catch (MPApiException e) {
+            log.error("MP API error processing webhook: {} - {}", e.getStatusCode(), e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.OK).build(); // Always return 200 to MP
+        } catch (MPException e) {
+            log.error("MP error processing webhook: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.OK).build();
+        } catch (Exception e) {
+            log.error("Unexpected error processing webhook", e);
+            return ResponseEntity.status(HttpStatus.OK).build(); // Always return 200 to MP
+        }
+    }
+
+    private void confirmBookingPayment(String externalReference, String paymentId) {
+        try {
+            String bookingNumber = externalReference.replace("BOOKING-", "");
+            log.info("Confirming payment for booking: {}", bookingNumber);
+
+            // Find booking and update payment ID first
+            Booking booking = bookingRepository.findByBookingNumber(bookingNumber)
+                    .orElseThrow(() -> new RuntimeException("Booking not found: " + bookingNumber));
+
+            // Update booking with payment ID
+            Booking updatedBooking = Booking.builder()
+                    .id(booking.getId())
+                    .bookingNumber(booking.getBookingNumber())
+                    .serviceId(booking.getServiceId())
+                    .customerInfo(booking.getCustomerInfo())
+                    .timeSlot(booking.getTimeSlot())
+                    .durationMinutes(booking.getDurationMinutes())
+                    .status(booking.getStatus())
+                    .paymentStatus(booking.getPaymentStatus())
+                    .mercadoPagoPreferenceId(booking.getMercadoPagoPreferenceId())
+                    .mercadoPagoPaymentId(paymentId)
+                    .amount(booking.getAmount())
+                    .createdAt(booking.getCreatedAt())
+                    .updatedAt(booking.getUpdatedAt())
+                    .confirmedAt(booking.getConfirmedAt())
+                    .cancelledAt(booking.getCancelledAt())
+                    .build();
+
+            bookingRepository.save(updatedBooking);
+
+            // Confirm payment via use case
+            confirmBookingPaymentUseCase.execute(paymentId);
+            log.info("Booking payment confirmed successfully: {}", bookingNumber);
+
+        } catch (Exception e) {
+            log.error("Error confirming booking payment", e);
+            throw new RuntimeException("Error confirming booking payment", e);
+        }
+    }
+
+    private void confirmOrderPayment(String externalReference, String paymentId) {
+        try {
+            String orderNumber = externalReference.replace("ORDER-", "");
+            log.info("Confirming payment for order: {}", orderNumber);
+
+            // Find order and update payment ID first
+            Order order = orderRepository.findByOrderNumber(orderNumber)
+                    .orElseThrow(() -> new RuntimeException("Order not found: " + orderNumber));
+
+            // Update order with payment ID
+            Order updatedOrder = Order.builder()
+                    .id(order.getId())
+                    .orderNumber(order.getOrderNumber())
+                    .customerInfo(order.getCustomerInfo())
+                    .deliveryInfo(order.getDeliveryInfo())
+                    .items(order.getItems())
+                    .subtotal(order.getSubtotal())
+                    .deliveryCost(order.getDeliveryCost())
+                    .total(order.getTotal())
+                    .status(order.getStatus())
+                    .paymentStatus(order.getPaymentStatus())
+                    .mercadoPagoPreferenceId(order.getMercadoPagoPreferenceId())
+                    .mercadoPagoPaymentId(paymentId)
+                    .createdAt(order.getCreatedAt())
+                    .updatedAt(order.getUpdatedAt())
+                    .build();
+
+            orderRepository.save(updatedOrder);
+
+            // Confirm payment via use case (decrements stock, sends email)
+            confirmOrderPaymentUseCase.execute(paymentId);
+            log.info("Order payment confirmed successfully: {}", orderNumber);
+
+        } catch (Exception e) {
+            log.error("Error confirming order payment", e);
+            throw new RuntimeException("Error confirming order payment", e);
+        }
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/payment/controller/PaymentController.java ==========
+package com.flavia.dermobeauty.payment.controller;
+
+import com.flavia.dermobeauty.booking.domain.Booking;
+import com.flavia.dermobeauty.booking.domain.BookingRepository;
+import com.flavia.dermobeauty.payment.dto.PaymentPreferenceResponse;
+import com.flavia.dermobeauty.payment.service.MercadoPagoClient;
+import com.flavia.dermobeauty.sales.domain.Order;
+import com.flavia.dermobeauty.sales.domain.OrderRepository;
+import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+/**
+ * Controller for payment preference creation.
+ * Public endpoints to initiate payment for bookings and orders.
+ */
+@Slf4j
+@RestController
+@RequestMapping("/api/public/payments")
+@RequiredArgsConstructor
+public class PaymentController {
+
+    private final MercadoPagoClient mercadoPagoClient;
+    private final BookingRepository bookingRepository;
+    private final OrderRepository orderRepository;
+
+    @PostMapping("/bookings/{bookingId}/preference")
+    public ResponseEntity<ApiResponse<PaymentPreferenceResponse>> createBookingPreference(
+            @PathVariable Long bookingId) {
+
+        log.info("Creating payment preference for booking: {}", bookingId);
+
+        Booking booking = bookingRepository.findById(bookingId)
+                .orElseThrow(() -> new ResourceNotFoundException("Booking", bookingId));
+
+        String preferenceId = mercadoPagoClient.createPreferenceForBooking(booking);
+
+        // Update booking with preference ID
+        Booking updatedBooking = Booking.builder()
+                .id(booking.getId())
+                .bookingNumber(booking.getBookingNumber())
+                .serviceId(booking.getServiceId())
+                .customerInfo(booking.getCustomerInfo())
+                .timeSlot(booking.getTimeSlot())
+                .durationMinutes(booking.getDurationMinutes())
+                .status(booking.getStatus())
+                .paymentStatus(booking.getPaymentStatus())
+                .mercadoPagoPreferenceId(preferenceId)
+                .mercadoPagoPaymentId(booking.getMercadoPagoPaymentId())
+                .amount(booking.getAmount())
+                .createdAt(booking.getCreatedAt())
+                .updatedAt(booking.getUpdatedAt())
+                .confirmedAt(booking.getConfirmedAt())
+                .cancelledAt(booking.getCancelledAt())
+                .build();
+
+        bookingRepository.save(updatedBooking);
+
+        PaymentPreferenceResponse response = new PaymentPreferenceResponse(
+                preferenceId,
+                "https://www.mercadopago.com.ar/checkout/v1/redirect?pref_id=" + preferenceId
+        );
+
+        return ResponseEntity.ok(ApiResponse.success(response, "Payment preference created"));
+    }
+
+    @PostMapping("/orders/{orderId}/preference")
+    public ResponseEntity<ApiResponse<PaymentPreferenceResponse>> createOrderPreference(
+            @PathVariable Long orderId) {
+
+        log.info("Creating payment preference for order: {}", orderId);
+
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new ResourceNotFoundException("Order", orderId));
+
+        String preferenceId = mercadoPagoClient.createPreferenceForOrder(order);
+
+        // Update order with preference ID
+        Order updatedOrder = Order.builder()
+                .id(order.getId())
+                .orderNumber(order.getOrderNumber())
+                .customerInfo(order.getCustomerInfo())
+                .deliveryInfo(order.getDeliveryInfo())
+                .items(order.getItems())
+                .subtotal(order.getSubtotal())
+                .deliveryCost(order.getDeliveryCost())
+                .total(order.getTotal())
+                .status(order.getStatus())
+                .paymentStatus(order.getPaymentStatus())
+                .mercadoPagoPreferenceId(preferenceId)
+                .mercadoPagoPaymentId(order.getMercadoPagoPaymentId())
+                .createdAt(order.getCreatedAt())
+                .updatedAt(order.getUpdatedAt())
+                .build();
+
+        orderRepository.save(updatedOrder);
+
+        PaymentPreferenceResponse response = new PaymentPreferenceResponse(
+                preferenceId,
+                "https://www.mercadopago.com.ar/checkout/v1/redirect?pref_id=" + preferenceId
+        );
+
+        return ResponseEntity.ok(ApiResponse.success(response, "Payment preference created"));
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/dto/CategoryDto.java ==========
+package com.flavia.dermobeauty.catalog.dto;
+
+import com.flavia.dermobeauty.catalog.entity.CategoryEntity;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+/**
+ * DTO for category data transfer.
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class CategoryDto {
+
+    private Long id;
+    private String name;
+    private String slug;
+    private String description;
+    private CategoryEntity.CategoryType type;
+
+    public static CategoryDto fromEntity(CategoryEntity entity) {
+        return CategoryDto.builder()
+                .id(entity.getId())
+                .name(entity.getName())
+                .slug(entity.getSlug())
+                .description(entity.getDescription())
+                .type(entity.getType())
+                .build();
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/dto/ServiceDto.java ==========
+package com.flavia.dermobeauty.catalog.dto;
+
+import com.flavia.dermobeauty.catalog.entity.ServiceEntity;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.math.BigDecimal;
+
+/**
+ * DTO for service data transfer with validation.
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class ServiceDto {
+
+    private Long id;
+
+    @NotBlank(message = "Name is required")
+    private String name;
+
+    private String slug;
+
+    @NotBlank(message = "Description is required")
+    private String description;
+
+    private String shortDescription;
+
+    @NotNull(message = "Duration is required")
+    @Min(value = 1, message = "Duration must be at least 1 minute")
+    private Integer durationMinutes;
+
+    @NotNull(message = "Price is required")
+    @DecimalMin(value = "0.0", inclusive = false, message = "Price must be greater than 0")
+    private BigDecimal price;
+
+    @NotNull(message = "Category ID is required")
+    private Long categoryId;
+
+    private String categoryName;
+
+    private String imageUrl;
+
+    private Boolean isFeatured;
+
+    private Boolean isActive;
+
+    public static ServiceDto fromEntity(ServiceEntity entity) {
+        return ServiceDto.builder()
+                .id(entity.getId())
+                .name(entity.getName())
+                .slug(entity.getSlug())
+                .description(entity.getDescription())
+                .shortDescription(entity.getShortDescription())
+                .durationMinutes(entity.getDurationMinutes())
+                .price(entity.getPrice())
+                .categoryId(entity.getCategory().getId())
+                .categoryName(entity.getCategory().getName())
+                .imageUrl(entity.getImageUrl())
+                .isFeatured(entity.getIsFeatured())
+                .isActive(entity.getIsActive())
+                .build();
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/dto/ProductDto.java ==========
+package com.flavia.dermobeauty.catalog.dto;
+
+import com.flavia.dermobeauty.catalog.entity.ProductEntity;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.math.BigDecimal;
+
+/**
+ * DTO for product data transfer with validation.
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class ProductDto {
+
+    private Long id;
+
+    @NotBlank(message = "Name is required")
+    private String name;
+
+    private String slug;
+
+    @NotBlank(message = "Description is required")
+    private String description;
+
+    private String shortDescription;
+
+    @NotNull(message = "Price is required")
+    @DecimalMin(value = "0.0", inclusive = false, message = "Price must be greater than 0")
+    private BigDecimal price;
+
+    @NotNull(message = "Stock is required")
+    @Min(value = 0, message = "Stock cannot be negative")
+    private Integer stock;
+
+    @NotNull(message = "Category ID is required")
+    private Long categoryId;
+
+    private String categoryName;
+
+    private String imageUrl;
+
+    private Boolean isFeatured;
+
+    private Boolean isOffer;
+
+    private Boolean isTrending;
+
+    private Boolean isActive;
+
+    public static ProductDto fromEntity(ProductEntity entity) {
+        return ProductDto.builder()
+                .id(entity.getId())
+                .name(entity.getName())
+                .slug(entity.getSlug())
+                .description(entity.getDescription())
+                .shortDescription(entity.getShortDescription())
+                .price(entity.getPrice())
+                .stock(entity.getStock())
+                .categoryId(entity.getCategory().getId())
+                .categoryName(entity.getCategory().getName())
+                .imageUrl(entity.getImageUrl())
+                .isFeatured(entity.getIsFeatured())
+                .isOffer(entity.getIsOffer())
+                .isTrending(entity.getIsTrending())
+                .isActive(entity.getIsActive())
+                .build();
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/repository/ProductRepository.java ==========
+package com.flavia.dermobeauty.catalog.repository;
+
+import com.flavia.dermobeauty.catalog.entity.ProductEntity;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Repository for product operations with custom queries for filtering.
+ */
+@Repository
+public interface ProductRepository extends JpaRepository<ProductEntity, Long> {
+
+    Optional<ProductEntity> findBySlug(String slug);
+
+    List<ProductEntity> findByIsActiveTrueOrderByCreatedAtDesc();
+
+    List<ProductEntity> findByIsFeaturedTrueAndIsActiveTrueOrderByCreatedAtDesc();
+
+    List<ProductEntity> findByIsOfferTrueAndIsActiveTrueOrderByCreatedAtDesc();
+
+    List<ProductEntity> findByIsTrendingTrueAndIsActiveTrueOrderByCreatedAtDesc();
+
+    @Query("SELECT p FROM ProductEntity p WHERE p.category.id = :categoryId AND p.isActive = true ORDER BY p.createdAt DESC")
+    List<ProductEntity> findByCategoryIdAndIsActiveTrue(@Param("categoryId") Long categoryId);
+
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE ProductEntity p SET p.stock = p.stock - :quantity WHERE p.id = :id AND p.stock >= :quantity")
+    int decrementStock(@Param("id") Long id, @Param("quantity") Integer quantity);
+
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/repository/ServiceRepository.java ==========
+package com.flavia.dermobeauty.catalog.repository;
+
+import com.flavia.dermobeauty.catalog.entity.ServiceEntity;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Repository for service operations with custom queries for filtering.
+ */
+@Repository
+public interface ServiceRepository extends JpaRepository<ServiceEntity, Long> {
+
+    Optional<ServiceEntity> findBySlug(String slug);
+
+    List<ServiceEntity> findByIsActiveTrueOrderByCreatedAtDesc();
+
+    List<ServiceEntity> findByIsFeaturedTrueAndIsActiveTrueOrderByCreatedAtDesc();
+
+    @Query("SELECT s FROM ServiceEntity s WHERE s.category.id = :categoryId AND s.isActive = true ORDER BY s.createdAt DESC")
+    List<ServiceEntity> findByCategoryIdAndIsActiveTrue(@Param("categoryId") Long categoryId);
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/repository/CategoryRepository.java ==========
+package com.flavia.dermobeauty.catalog.repository;
+
+import com.flavia.dermobeauty.catalog.entity.CategoryEntity;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Repository for category operations.
+ */
+@Repository
+public interface CategoryRepository extends JpaRepository<CategoryEntity, Long> {
+
+    Optional<CategoryEntity> findBySlug(String slug);
+
+    List<CategoryEntity> findByType(CategoryEntity.CategoryType type);
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/entity/CategoryEntity.java ==========
+package com.flavia.dermobeauty.catalog.entity;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.time.LocalDateTime;
+
+/**
+ * JPA entity for categories table.
+ * Categories are used to organize both services and products.
+ */
+@Entity
+@Table(name = "categories")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class CategoryEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false, length = 100)
+    private String name;
+
+    @Column(nullable = false, unique = true, length = 100)
+    private String slug;
+
+    @Column(columnDefinition = "TEXT")
+    private String description;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private CategoryType type;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private LocalDateTime updatedAt;
+
+    @PrePersist
+    protected void onCreate() {
+        createdAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now();
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
+
+    public enum CategoryType {
+        SERVICE, PRODUCT
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/entity/ProductEntity.java ==========
+package com.flavia.dermobeauty.catalog.entity;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+/**
+ * JPA entity for products table.
+ * Represents beauty/dermatology products for sale.
+ */
+@Entity
+@Table(name = "products")
+@Getter@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class ProductEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false, length = 200)
+    private String name;
+
+    @Column(nullable = false, unique = true, length = 200)
+    private String slug;
+
+    @Column(columnDefinition = "TEXT")
+    private String description;
+
+    @Column(name = "short_description", length = 500)
+    private String shortDescription;
+
+    @Column(nullable = false, precision = 10, scale = 2)
+    private BigDecimal price;
+
+    @Column(nullable = false)
+    private Integer stock = 0;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "category_id", nullable = false)
+    @ToString.Exclude
+    private CategoryEntity category;
+
+    @Column(name = "image_url", length = 500)
+    private String imageUrl;
+
+    @Column(name = "is_featured", nullable = false)
+    private Boolean isFeatured = false;
+
+    @Column(name = "is_offer", nullable = false)
+    private Boolean isOffer = false;
+
+    @Column(name = "is_trending", nullable = false)
+    private Boolean isTrending = false;
+
+    @Column(name = "is_active", nullable = false)
+    private Boolean isActive = true;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private LocalDateTime updatedAt;
+
+    @PrePersist
+    protected void onCreate() {
+        createdAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now();
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/entity/ServiceEntity.java ==========
+package com.flavia.dermobeauty.catalog.entity;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+/**
+ * JPA entity for services table.
+ * Represents professional services offered (e.g., facial treatments, peels).
+ */
+@Entity
+@Table(name = "services")
+@Getter@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class ServiceEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false, length = 200)
+    private String name;
+
+    @Column(nullable = false, unique = true, length = 200)
+    private String slug;
+
+    @Column(columnDefinition = "TEXT")
+    private String description;
+
+    @Column(name = "short_description", length = 500)
+    private String shortDescription;
+
+    @Column(name = "duration_minutes", nullable = false)
+    private Integer durationMinutes;
+
+    @Column(nullable = false, precision = 10, scale = 2)
+    private BigDecimal price;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "category_id", nullable = false)
+    @ToString.Exclude
+    private CategoryEntity category;
+
+    @Column(name = "image_url", length = 500)
+    private String imageUrl;
+
+    @Column(name = "is_featured", nullable = false)
+    private Boolean isFeatured = false;
+
+    @Column(name = "is_active", nullable = false)
+    private Boolean isActive = true;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private LocalDateTime updatedAt;
+
+    @PrePersist
+    protected void onCreate() {
+        createdAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now();
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/service/ProductCatalogService.java ==========
+package com.flavia.dermobeauty.catalog.service;
+
+import com.flavia.dermobeauty.catalog.dto.ProductDto;
+import com.flavia.dermobeauty.catalog.entity.CategoryEntity;
+import com.flavia.dermobeauty.catalog.entity.ProductEntity;
+import com.flavia.dermobeauty.catalog.repository.CategoryRepository;
+import com.flavia.dermobeauty.catalog.repository.ProductRepository;
+import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+/**
+ * Service for managing product catalog operations.
+ * Provides CRUD operations for beauty/dermatology products.
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class ProductCatalogService {
+
+    private final ProductRepository productRepository;
+    private final CategoryRepository categoryRepository;
+
+    @Transactional(readOnly = true)
+    public List<ProductDto> getAllActive() {
+        log.debug("Fetching all active products");
+        return productRepository.findByIsActiveTrueOrderByCreatedAtDesc()
+                .stream()
+                .map(ProductDto::fromEntity)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<ProductDto> getAllForAdmin() {
+        log.debug("Fetching all products for admin");
+        // Usamos findAll() estándar de JPA para traer todo
+        return productRepository.findAll()
+                .stream()
+                .map(ProductDto::fromEntity)
+                // Ordenamos por ID o fecha para que no salten en la tabla
+                .sorted((a, b) -> b.getId().compareTo(a.getId()))
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<ProductDto> getFeatured() {
+        log.debug("Fetching featured products");
+        return productRepository.findByIsFeaturedTrueAndIsActiveTrueOrderByCreatedAtDesc()
+                .stream()
+                .map(ProductDto::fromEntity)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<ProductDto> getOffers() {
+        log.debug("Fetching products on offer");
+        return productRepository.findByIsOfferTrueAndIsActiveTrueOrderByCreatedAtDesc()
+                .stream()
+                .map(ProductDto::fromEntity)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<ProductDto> getTrending() {
+        log.debug("Fetching trending products");
+        return productRepository.findByIsTrendingTrueAndIsActiveTrueOrderByCreatedAtDesc()
+                .stream()
+                .map(ProductDto::fromEntity)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public ProductDto getById(Long id) {
+        log.debug("Fetching product by id: {}", id);
+        ProductEntity entity = productRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Product", id));
+        return ProductDto.fromEntity(entity);
+    }
+
+    @Transactional(readOnly = true)
+    public ProductDto getBySlug(String slug) {
+        log.debug("Fetching product by slug: {}", slug);
+        ProductEntity entity = productRepository.findBySlug(slug)
+                .orElseThrow(() -> new ResourceNotFoundException("Product with slug '" + slug + "' not found"));
+        return ProductDto.fromEntity(entity);
+    }
+
+    @Transactional(readOnly = true)
+    public List<ProductDto> getByCategory(Long categoryId) {
+        log.debug("Fetching products by category: {}", categoryId);
+        return productRepository.findByCategoryIdAndIsActiveTrue(categoryId)
+                .stream()
+                .map(ProductDto::fromEntity)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional
+    public ProductDto create(ProductDto dto) {
+        log.info("Creating new product: {}", dto.getName());
+
+        CategoryEntity category = categoryRepository.findById(dto.getCategoryId())
+                .orElseThrow(() -> new ResourceNotFoundException("Category", dto.getCategoryId()));
+
+        ProductEntity entity = ProductEntity.builder()
+                .name(dto.getName())
+                .slug(generateSlug(dto.getName()))
+                .description(dto.getDescription())
+                .shortDescription(dto.getShortDescription())
+                .price(dto.getPrice())
+                .stock(dto.getStock() != null ? dto.getStock() : 0)
+                .category(category)
+                .imageUrl(dto.getImageUrl())
+                .isFeatured(dto.getIsFeatured() != null ? dto.getIsFeatured() : false)
+                .isOffer(dto.getIsOffer() != null ? dto.getIsOffer() : false)
+                .isTrending(dto.getIsTrending() != null ? dto.getIsTrending() : false)
+                .isActive(dto.getIsActive() != null ? dto.getIsActive() : true)
+                .build();
+
+        ProductEntity saved = productRepository.save(entity);
+        return ProductDto.fromEntity(saved);
+    }
+
+    @Transactional
+    public ProductDto update(Long id, ProductDto dto) {
+        log.info("Updating product: {}", id);
+
+        ProductEntity entity = productRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Product", id));
+
+        if (dto.getCategoryId() != null && !dto.getCategoryId().equals(entity.getCategory().getId())) {
+            CategoryEntity category = categoryRepository.findById(dto.getCategoryId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Category", dto.getCategoryId()));
+            entity.setCategory(category);
+        }
+
+        entity.setName(dto.getName());
+        entity.setDescription(dto.getDescription());
+        entity.setShortDescription(dto.getShortDescription());
+        entity.setPrice(dto.getPrice());
+        entity.setStock(dto.getStock());
+        entity.setImageUrl(dto.getImageUrl());
+        entity.setIsFeatured(dto.getIsFeatured());
+        entity.setIsOffer(dto.getIsOffer());
+        entity.setIsTrending(dto.getIsTrending());
+        entity.setIsActive(dto.getIsActive());
+
+        ProductEntity updated = productRepository.save(entity);
+        return ProductDto.fromEntity(updated);
+    }
+
+    @Transactional
+    public void delete(Long id) {
+        log.info("Deleting product: {}", id);
+        if (!productRepository.existsById(id)) {
+            throw new ResourceNotFoundException("Product", id);
+        }
+        productRepository.deleteById(id);
+    }
+
+    private String generateSlug(String name) {
+        return name.toLowerCase()
+                .replaceAll("[^a-z0-9\\s-]", "")
+                .replaceAll("\\s+", "-")
+                .replaceAll("-+", "-");
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/service/ServiceCatalogService.java ==========
+package com.flavia.dermobeauty.catalog.service;
+
+import com.flavia.dermobeauty.catalog.dto.ServiceDto;
+import com.flavia.dermobeauty.catalog.entity.CategoryEntity;
+import com.flavia.dermobeauty.catalog.entity.ServiceEntity;
+import com.flavia.dermobeauty.catalog.repository.CategoryRepository;
+import com.flavia.dermobeauty.catalog.repository.ServiceRepository;
+import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+/**
+ * Service for managing service catalog operations.
+ * Provides CRUD operations for beauty/dermatology services.
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class ServiceCatalogService {
+
+    private final ServiceRepository serviceRepository;
+    private final CategoryRepository categoryRepository;
+
+    @Transactional(readOnly = true)
+    public List<ServiceDto> getAllActive() {
+        log.debug("Fetching all active services");
+        return serviceRepository.findByIsActiveTrueOrderByCreatedAtDesc()
+                .stream()
+                .map(ServiceDto::fromEntity)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<ServiceDto> getAllForAdmin() {
+        log.debug("Fetching all services for admin");
+        return serviceRepository.findAll()
+                .stream()
+                .map(ServiceDto::fromEntity)
+                .sorted((a, b) -> b.getId().compareTo(a.getId()))
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<ServiceDto> getFeatured() {
+        log.debug("Fetching featured services");
+        return serviceRepository.findByIsFeaturedTrueAndIsActiveTrueOrderByCreatedAtDesc()
+                .stream()
+                .map(ServiceDto::fromEntity)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public ServiceDto getById(Long id) {
+        log.debug("Fetching service by id: {}", id);
+        ServiceEntity entity = serviceRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Service", id));
+        return ServiceDto.fromEntity(entity);
+    }
+
+    @Transactional(readOnly = true)
+    public ServiceDto getBySlug(String slug) {
+        log.debug("Fetching service by slug: {}", slug);
+        ServiceEntity entity = serviceRepository.findBySlug(slug)
+                .orElseThrow(() -> new ResourceNotFoundException("Service with slug '" + slug + "' not found"));
+        return ServiceDto.fromEntity(entity);
+    }
+
+    @Transactional(readOnly = true)
+    public List<ServiceDto> getByCategory(Long categoryId) {
+        log.debug("Fetching services by category: {}", categoryId);
+        return serviceRepository.findByCategoryIdAndIsActiveTrue(categoryId)
+                .stream()
+                .map(ServiceDto::fromEntity)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional
+    public ServiceDto create(ServiceDto dto) {
+        log.info("Creating new service: {}", dto.getName());
+
+        CategoryEntity category = categoryRepository.findById(dto.getCategoryId())
+                .orElseThrow(() -> new ResourceNotFoundException("Category", dto.getCategoryId()));
+
+        ServiceEntity entity = ServiceEntity.builder()
+                .name(dto.getName())
+                .slug(generateSlug(dto.getName()))
+                .description(dto.getDescription())
+                .shortDescription(dto.getShortDescription())
+                .durationMinutes(dto.getDurationMinutes())
+                .price(dto.getPrice())
+                .category(category)
+                .imageUrl(dto.getImageUrl())
+                .isFeatured(dto.getIsFeatured() != null ? dto.getIsFeatured() : false)
+                .isActive(dto.getIsActive() != null ? dto.getIsActive() : true)
+                .build();
+
+        ServiceEntity saved = serviceRepository.save(entity);
+        return ServiceDto.fromEntity(saved);
+    }
+
+    @Transactional
+    public ServiceDto update(Long id, ServiceDto dto) {
+        log.info("Updating service: {}", id);
+
+        ServiceEntity entity = serviceRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Service", id));
+
+        if (dto.getCategoryId() != null && !dto.getCategoryId().equals(entity.getCategory().getId())) {
+            CategoryEntity category = categoryRepository.findById(dto.getCategoryId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Category", dto.getCategoryId()));
+            entity.setCategory(category);
+        }
+
+        entity.setName(dto.getName());
+        entity.setDescription(dto.getDescription());
+        entity.setShortDescription(dto.getShortDescription());
+        entity.setDurationMinutes(dto.getDurationMinutes());
+        entity.setPrice(dto.getPrice());
+        entity.setImageUrl(dto.getImageUrl());
+        entity.setIsFeatured(dto.getIsFeatured());
+        entity.setIsActive(dto.getIsActive());
+
+        ServiceEntity updated = serviceRepository.save(entity);
+        return ServiceDto.fromEntity(updated);
+    }
+
+    @Transactional
+    public void delete(Long id) {
+        log.info("Deleting service: {}", id);
+        if (!serviceRepository.existsById(id)) {
+            throw new ResourceNotFoundException("Service", id);
+        }
+        serviceRepository.deleteById(id);
+    }
+
+    private String generateSlug(String name) {
+        return name.toLowerCase()
+                .replaceAll("[^a-z0-9\\s-]", "")
+                .replaceAll("\\s+", "-")
+                .replaceAll("-+", "-");
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/controller/ProductController.java ==========
+package com.flavia.dermobeauty.catalog.controller;
+
+import com.flavia.dermobeauty.catalog.dto.ProductDto;
+import com.flavia.dermobeauty.catalog.service.ProductCatalogService;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+/**
+ * Public REST controller for product catalog operations.
+ * Provides endpoints for browsing available products.
+ */
+@RestController
+@RequestMapping("/api/public/products")
+@RequiredArgsConstructor
+public class ProductController {
+
+    private final ProductCatalogService productCatalogService;
+
+    @GetMapping
+    public ResponseEntity<ApiResponse<List<ProductDto>>> getAllProducts() {
+        List<ProductDto> products = productCatalogService.getAllActive();
+        return ResponseEntity.ok(ApiResponse.success(products));
+    }
+
+    @GetMapping("/featured")
+    public ResponseEntity<ApiResponse<List<ProductDto>>> getFeaturedProducts() {
+        List<ProductDto> products = productCatalogService.getFeatured();
+        return ResponseEntity.ok(ApiResponse.success(products));
+    }
+
+    @GetMapping("/offers")
+    public ResponseEntity<ApiResponse<List<ProductDto>>> getOfferProducts() {
+        List<ProductDto> products = productCatalogService.getOffers();
+        return ResponseEntity.ok(ApiResponse.success(products));
+    }
+
+    @GetMapping("/trending")
+    public ResponseEntity<ApiResponse<List<ProductDto>>> getTrendingProducts() {
+        List<ProductDto> products = productCatalogService.getTrending();
+        return ResponseEntity.ok(ApiResponse.success(products));
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<ApiResponse<ProductDto>> getProductById(@PathVariable Long id) {
+        ProductDto product = productCatalogService.getById(id);
+        return ResponseEntity.ok(ApiResponse.success(product));
+    }
+
+    @GetMapping("/slug/{slug}")
+    public ResponseEntity<ApiResponse<ProductDto>> getProductBySlug(@PathVariable String slug) {
+        ProductDto product = productCatalogService.getBySlug(slug);
+        return ResponseEntity.ok(ApiResponse.success(product));
+    }
+
+    @GetMapping("/category/{categoryId}")
+    public ResponseEntity<ApiResponse<List<ProductDto>>> getProductsByCategory(@PathVariable Long categoryId) {
+        List<ProductDto> products = productCatalogService.getByCategory(categoryId);
+        return ResponseEntity.ok(ApiResponse.success(products));
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/controller/AdminCatalogController.java ==========
+package com.flavia.dermobeauty.catalog.controller;
+
+import com.flavia.dermobeauty.catalog.dto.CategoryDto;
+import com.flavia.dermobeauty.catalog.dto.ProductDto;
+import com.flavia.dermobeauty.catalog.dto.ServiceDto;
+import com.flavia.dermobeauty.catalog.entity.CategoryEntity;
+import com.flavia.dermobeauty.catalog.repository.CategoryRepository;
+import com.flavia.dermobeauty.catalog.service.ProductCatalogService;
+import com.flavia.dermobeauty.catalog.service.ServiceCatalogService;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Slf4j
+@RestController
+@RequestMapping("/api/admin")
+@RequiredArgsConstructor
+public class AdminCatalogController {
+
+    private final ServiceCatalogService serviceService;
+    private final ProductCatalogService productService;
+    private final CategoryRepository categoryRepository;
+
+    // ==================== SERVICES ====================
+
+    @GetMapping("/services")
+    public ResponseEntity<ApiResponse<List<ServiceDto>>> getAllServices() {
+        return ResponseEntity.ok(ApiResponse.success(serviceService.getAllForAdmin()));
+    }
+
+    @GetMapping("/services/{id}")
+    public ResponseEntity<ApiResponse<ServiceDto>> getService(@PathVariable Long id) {
+        return ResponseEntity.ok(ApiResponse.success(serviceService.getById(id)));
+    }
+
+    @PostMapping("/services")
+    public ResponseEntity<ApiResponse<ServiceDto>> createService(@Valid @RequestBody ServiceDto dto) {
+        return ResponseEntity.ok(ApiResponse.success(serviceService.create(dto), "Servicio creado"));
+    }
+
+    @PutMapping("/services/{id}")
+    public ResponseEntity<ApiResponse<ServiceDto>> updateService(@PathVariable Long id, @Valid @RequestBody ServiceDto dto) {
+        return ResponseEntity.ok(ApiResponse.success(serviceService.update(id, dto), "Servicio actualizado"));
+    }
+
+    @DeleteMapping("/services/{id}")
+    public ResponseEntity<ApiResponse<Void>> deleteService(@PathVariable Long id) {
+        serviceService.delete(id);
+        return ResponseEntity.ok(ApiResponse.success("Servicio eliminado"));
+    }
+
+    @PatchMapping("/services/{id}/featured")
+    public ResponseEntity<ApiResponse<ServiceDto>> toggleServiceFeatured(@PathVariable Long id) {
+        // Obtenemos actual, invertimos flag y guardamos
+        ServiceDto current = serviceService.getById(id);
+        current.setIsFeatured(!current.getIsFeatured());
+        return ResponseEntity.ok(ApiResponse.success(serviceService.update(id, current)));
+    }
+
+    // ==================== PRODUCTS ====================
+
+    @GetMapping("/products")
+    public ResponseEntity<ApiResponse<List<ProductDto>>> getAllProducts() {
+        return ResponseEntity.ok(ApiResponse.success(productService.getAllForAdmin()));
+    }
+
+    @GetMapping("/products/{id}")
+    public ResponseEntity<ApiResponse<ProductDto>> getProduct(@PathVariable Long id) {
+        return ResponseEntity.ok(ApiResponse.success(productService.getById(id)));
+    }
+
+    @PostMapping("/products")
+    public ResponseEntity<ApiResponse<ProductDto>> createProduct(@Valid @RequestBody ProductDto dto) {
+        return ResponseEntity.ok(ApiResponse.success(productService.create(dto), "Producto creado"));
+    }
+
+    @PutMapping("/products/{id}")
+    public ResponseEntity<ApiResponse<ProductDto>> updateProduct(@PathVariable Long id, @Valid @RequestBody ProductDto dto) {
+        return ResponseEntity.ok(ApiResponse.success(productService.update(id, dto), "Producto actualizado"));
+    }
+
+    @DeleteMapping("/products/{id}")
+    public ResponseEntity<ApiResponse<Void>> deleteProduct(@PathVariable Long id) {
+        productService.delete(id);
+        return ResponseEntity.ok(ApiResponse.success("Producto eliminado"));
+    }
+
+    @PatchMapping("/products/{id}/featured")
+    public ResponseEntity<ApiResponse<ProductDto>> toggleProductFeatured(@PathVariable Long id) {
+        ProductDto current = productService.getById(id);
+        current.setIsFeatured(!current.getIsFeatured());
+        return ResponseEntity.ok(ApiResponse.success(productService.update(id, current)));
+    }
+
+    // ==================== CATEGORIES ====================
+
+    @GetMapping("/categories")
+    public ResponseEntity<ApiResponse<List<CategoryDto>>> getAllCategories() {
+        List<CategoryDto> categories = categoryRepository.findAll().stream()
+                .map(CategoryDto::fromEntity)
+                .collect(Collectors.toList());
+        return ResponseEntity.ok(ApiResponse.success(categories));
+    }
+
+    @PostMapping("/categories")
+    public ResponseEntity<ApiResponse<CategoryDto>> createCategory(@RequestBody CategoryEntity category) {
+        // Simplificación: Guardamos directo la entidad (mejorar con DTO/Service en futuro)
+        // Generar slug simple
+        category.setSlug(category.getName().toLowerCase().replace(" ", "-"));
+        CategoryEntity saved = categoryRepository.save(category);
+        return ResponseEntity.ok(ApiResponse.success(CategoryDto.fromEntity(saved)));
+    }
+
+    @DeleteMapping("/categories/{id}")
+    public ResponseEntity<ApiResponse<Void>> deleteCategory(@PathVariable Long id) {
+        categoryRepository.deleteById(id);
+        return ResponseEntity.ok(ApiResponse.success("Categoría eliminada"));
+    }
+}
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/controller/CategoryController.java ==========
+package com.flavia.dermobeauty.catalog.controller;
+
+import com.flavia.dermobeauty.catalog.dto.CategoryDto;
+import com.flavia.dermobeauty.catalog.entity.CategoryEntity;
+import com.flavia.dermobeauty.catalog.repository.CategoryRepository;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+/**
+ * Public REST controller for category operations.
+ * Provides endpoints for browsing categories.
+ */
+@RestController
+@RequestMapping("/api/public/categories")
+@RequiredArgsConstructor
+public class CategoryController {
+
+    private final CategoryRepository categoryRepository;
+
+    @GetMapping
+    public ResponseEntity<ApiResponse<List<CategoryDto>>> getAllCategories() {
+        List<CategoryDto> categories = categoryRepository.findAll()
+                .stream()
+                .map(CategoryDto::fromEntity)
+                .collect(Collectors.toList());
+        return ResponseEntity.ok(ApiResponse.success(categories));
+    }
+
+    @GetMapping("/type/{type}")
+    public ResponseEntity<ApiResponse<List<CategoryDto>>> getCategoriesByType(@PathVariable CategoryEntity.CategoryType type) {
+        List<CategoryDto> categories = categoryRepository.findByType(type)
+                .stream()
+                .map(CategoryDto::fromEntity)
+                .collect(Collectors.toList());
+        return ResponseEntity.ok(ApiResponse.success(categories));
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/controller/FileUploadController.java ==========
+package com.flavia.dermobeauty.catalog.controller;
+
+import com.flavia.dermobeauty.shared.exception.ValidationException;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.IOException;
+import java.net.MalformedURLException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
+
+/**
+ * Controller for file upload and retrieval.
+ * Handles image uploads for services and products.
+ */
+@Slf4j
+@RestController
+@RequestMapping("/api")
+public class FileUploadController {
+
+    private static final List<String> ALLOWED_CONTENT_TYPES = Arrays.asList(
+            "image/jpeg", "image/jpg", "image/png", "image/webp"
+    );
+    private static final long MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+
+    private final Path uploadPath;
+
+    public FileUploadController(@Value("${app.upload-dir}") String uploadDir) {
+        this.uploadPath = Paths.get(uploadDir).toAbsolutePath().normalize();
+        try {
+            Files.createDirectories(this.uploadPath);
+            log.info("Upload directory created at: {}", this.uploadPath);
+        } catch (IOException e) {
+            throw new RuntimeException("Could not create upload directory", e);
+        }
+    }
+
+    @PostMapping("/admin/uploads")
+    public ResponseEntity<ApiResponse<String>> uploadFile(@RequestParam("file") MultipartFile file) {
+        validateFile(file);
+
+        try {
+            String originalFilename = file.getOriginalFilename();
+            String extension = originalFilename != null && originalFilename.contains(".")
+                    ? originalFilename.substring(originalFilename.lastIndexOf("."))
+                    : ".jpg";
+
+            String filename = UUID.randomUUID().toString() + extension;
+            Path targetLocation = uploadPath.resolve(filename);
+
+            Files.copy(file.getInputStream(), targetLocation, StandardCopyOption.REPLACE_EXISTING);
+            log.info("File uploaded successfully: {}", filename);
+
+            String fileUrl = "/api/uploads/" + filename;
+            return ResponseEntity.ok(ApiResponse.success(fileUrl, "File uploaded successfully"));
+
+        } catch (IOException e) {
+            log.error("Failed to upload file", e);
+            throw new ValidationException("Failed to upload file: " + e.getMessage());
+        }
+    }
+
+    @GetMapping("/uploads/{filename:.+}")
+    public ResponseEntity<Resource> getFile(@PathVariable String filename) {
+        try {
+            Path filePath = uploadPath.resolve(filename).normalize();
+            Resource resource = new UrlResource(filePath.toUri());
+
+            if (!resource.exists() || !resource.isReadable()) {
+                throw new ValidationException("File not found: " + filename);
+            }
+
+            String contentType = Files.probeContentType(filePath);
+            if (contentType == null) {
+                contentType = "application/octet-stream";
+            }
+
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + resource.getFilename() + "\"")
+                    .body(resource);
+
+        } catch (MalformedURLException e) {
+            log.error("Invalid file path: {}", filename, e);
+            throw new ValidationException("Invalid file path");
+        } catch (IOException e) {
+            log.error("Error reading file: {}", filename, e);
+            throw new ValidationException("Error reading file");
+        }
+    }
+
+    private void validateFile(MultipartFile file) {
+        if (file.isEmpty()) {
+            throw new ValidationException("File is empty");
+        }
+
+        if (file.getSize() > MAX_FILE_SIZE) {
+            throw new ValidationException("File size exceeds maximum allowed (5MB)");
+        }
+
+        String contentType = file.getContentType();
+        if (contentType == null || !ALLOWED_CONTENT_TYPES.contains(contentType)) {
+            throw new ValidationException("Invalid file type. Allowed types: JPEG, PNG, WebP");
+        }
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/catalog/controller/ServiceController.java ==========
+package com.flavia.dermobeauty.catalog.controller;
+
+import com.flavia.dermobeauty.catalog.dto.ServiceDto;
+import com.flavia.dermobeauty.catalog.service.ServiceCatalogService;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+/**
+ * Public REST controller for service catalog operations.
+ * Provides endpoints for browsing available services.
+ */
+@RestController
+@RequestMapping("/api/public/services")
+@RequiredArgsConstructor
+public class ServiceController {
+
+    private final ServiceCatalogService serviceCatalogService;
+
+    @GetMapping
+    public ResponseEntity<ApiResponse<List<ServiceDto>>> getAllServices() {
+        List<ServiceDto> services = serviceCatalogService.getAllActive();
+        return ResponseEntity.ok(ApiResponse.success(services));
+    }
+
+    @GetMapping("/featured")
+    public ResponseEntity<ApiResponse<List<ServiceDto>>> getFeaturedServices() {
+        List<ServiceDto> services = serviceCatalogService.getFeatured();
+        return ResponseEntity.ok(ApiResponse.success(services));
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<ApiResponse<ServiceDto>> getServiceById(@PathVariable Long id) {
+        ServiceDto service = serviceCatalogService.getById(id);
+        return ResponseEntity.ok(ApiResponse.success(service));
+    }
+
+    @GetMapping("/slug/{slug}")
+    public ResponseEntity<ApiResponse<ServiceDto>> getServiceBySlug(@PathVariable String slug) {
+        ServiceDto service = serviceCatalogService.getBySlug(slug);
+        return ResponseEntity.ok(ApiResponse.success(service));
+    }
+
+    @GetMapping("/category/{categoryId}")
+    public ResponseEntity<ApiResponse<List<ServiceDto>>> getServicesByCategory(@PathVariable Long categoryId) {
+        List<ServiceDto> services = serviceCatalogService.getByCategory(categoryId);
+        return ResponseEntity.ok(ApiResponse.success(services));
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/booking/infrastructure/persistence/JpaBookingRepository.java ==========
+package com.flavia.dermobeauty.booking.infrastructure.persistence;
+
+import com.flavia.dermobeauty.booking.domain.BookingStatus;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Spring Data JPA repository for BookingEntity.
+ * Infrastructure implementation detail.
+ */
+@Repository
+public interface JpaBookingRepository extends JpaRepository<BookingEntity, Long> {
+
+    Optional<BookingEntity> findByBookingNumber(String bookingNumber);
+
+    Optional<BookingEntity> findByMercadoPagoPaymentId(String paymentId);
+
+    List<BookingEntity> findByStatus(BookingStatus status);
+
+    List<BookingEntity> findByBookingDateAndStatusNot(LocalDate bookingDate, BookingStatus status);
+
+    // Un turno se solapa si: (StartA < EndB) y (StartB < EndA)
+    @Query(value = """
+           SELECT CASE WHEN COUNT(*) > 0 THEN true ELSE false END
+           FROM bookings b
+           WHERE b.service_id = :serviceId
+           AND b.booking_date = :date
+           AND b.status != 'CANCELLED'
+           AND (
+               b.booking_time < :endTime
+               AND :startTime < (b.booking_time + (b.duration_minutes * interval '1 minute'))
+           )
+           """, nativeQuery = true)
+    boolean existsOverlappingBooking(
+            @Param("serviceId") Long serviceId,
+            @Param("date") LocalDate date,
+            @Param("startTime") LocalTime startTime,
+            @Param("endTime") LocalTime endTime
+    );
+}
+========== FILE: src/main/java/com/flavia/dermobeauty/booking/infrastructure/persistence/BookingEntity.java ==========
+package com.flavia.dermobeauty.booking.infrastructure.persistence;
+
+import com.flavia.dermobeauty.booking.domain.BookingStatus;
+import com.flavia.dermobeauty.booking.domain.PaymentStatus;
+import jakarta.persistence.*;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+
+/**
+ * JPA entity for bookings table.
+ * Infrastructure layer representation of Booking aggregate.
+ */
+@Entity
+@Table(name = "bookings")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class BookingEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "booking_number", nullable = false, unique = true, length = 50)
+    private String bookingNumber;
+
+    @Column(name = "service_id", nullable = false)
+    private Long serviceId;
+
+    // Customer information (embedded fields)
+    @Column(name = "customer_name", nullable = false, length = 200)
+    private String customerName;
+
+    @Column(name = "customer_email", nullable = false, length = 200)
+    private String customerEmail;
+
+    @Column(name = "customer_whatsapp", nullable = false, length = 50)
+    private String customerWhatsapp;
+
+    @Column(name = "customer_comments", columnDefinition = "TEXT")
+    private String customerComments;
+
+    // Time slot (embedded fields)
+    @Column(name = "booking_date", nullable = false)
+    private LocalDate bookingDate;
+
+    @Column(name = "booking_time", nullable = false)
+    private LocalTime bookingTime;
+
+    @Column(name = "duration_minutes", nullable = false)
+    private Integer durationMinutes;
+
+    // Status tracking
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private BookingStatus status;
+
+    // Payment information
+    @Enumerated(EnumType.STRING)
+    @Column(name = "payment_status", nullable = false, length = 20)
+    private PaymentStatus paymentStatus;
+
+    @Column(name = "mercadopago_preference_id", length = 200)
+    private String mercadoPagoPreferenceId;
+
+    @Column(name = "mercadopago_payment_id", length = 200)
+    private String mercadoPagoPaymentId;
+
+    @Column(nullable = false, precision = 10, scale = 2)
+    private BigDecimal amount;
+
+    // Timestamps
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private LocalDateTime updatedAt;
+
+    @Column(name = "confirmed_at")
+    private LocalDateTime confirmedAt;
+
+    @Column(name = "cancelled_at")
+    private LocalDateTime cancelledAt;
+
+    @PrePersist
+    protected void onCreate() {
+        if (createdAt == null) {
+            createdAt = LocalDateTime.now();
+        }
+        if (updatedAt == null) {
+            updatedAt = LocalDateTime.now();
+        }
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/booking/infrastructure/notification/StubNotificationService.java ==========
+package com.flavia.dermobeauty.booking.infrastructure.notification;
+
+import com.flavia.dermobeauty.booking.application.port.NotificationService;
+import com.flavia.dermobeauty.booking.domain.Booking;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+/**
+ * Stub implementation of NotificationService for Phase 5.
+ * Will be replaced with full email implementation in Phase 8.
+ */
+@Slf4j
+@Service
+public class StubNotificationService implements NotificationService {
+
+    @Override
+    public void sendBookingConfirmation(Booking booking) {
+        log.info("STUB: Would send booking confirmation email for {} to {}",
+                booking.getBookingNumber(),
+                booking.getCustomerInfo().getEmail());
+
+        // No-op for now - will implement email sending in Phase 8
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/booking/config/BookingConfig.java ==========
+package com.flavia.dermobeauty.booking.config;
+
+import com.flavia.dermobeauty.booking.application.port.NotificationService;
+import com.flavia.dermobeauty.booking.application.usecase.*;
+import com.flavia.dermobeauty.booking.domain.BookingRepository;
+import com.flavia.dermobeauty.catalog.repository.ServiceRepository;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+/**
+ * Configuration class for Booking module.
+ * Wires use cases as Spring beans for dependency injection.
+ */
+@Configuration
+public class BookingConfig {
+
+    @Bean
+    public CreateBookingUseCase createBookingUseCase(BookingRepository bookingRepository) {
+        return new CreateBookingUseCase(bookingRepository);
+    }
+
+    @Bean
+    public ConfirmBookingPaymentUseCase confirmBookingPaymentUseCase(
+            BookingRepository bookingRepository,
+            NotificationService notificationService) {
+        return new ConfirmBookingPaymentUseCase(bookingRepository, notificationService);
+    }
+
+    @Bean
+    public ListBookingsUseCase listBookingsUseCase(BookingRepository bookingRepository) {
+        return new ListBookingsUseCase(bookingRepository);
+    }
+
+    @Bean
+    public CancelBookingUseCase cancelBookingUseCase(BookingRepository bookingRepository) {
+        return new CancelBookingUseCase(bookingRepository);
+    }
+
+    @Bean
+    public GetBookingByNumberUseCase getBookingByNumberUseCase(BookingRepository bookingRepository) {
+        return new GetBookingByNumberUseCase(bookingRepository);
+    }
+
+    @Bean
+    public GetAvailableSlotsUseCase getAvailableSlotsUseCase(
+            BookingRepository bookingRepository,
+            ServiceRepository serviceRepository
+    ) {
+        return new GetAvailableSlotsUseCase(bookingRepository, serviceRepository);
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/booking/domain/BookingRepository.java ==========
+package com.flavia.dermobeauty.booking.domain;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Repository port (interface) for Booking aggregate.
+ * Defines operations needed by the domain layer without specifying implementation.
+ * Implementation will be provided by infrastructure layer.
+ */
+public interface BookingRepository {
+
+    /**
+     * Save a booking (create or update).
+     */
+    Booking save(Booking booking);
+
+    /**
+     * Find booking by ID.
+     */
+    Optional<Booking> findById(Long id);
+
+    /**
+     * Find booking by booking number.
+     */
+    Optional<Booking> findByBookingNumber(String bookingNumber);
+
+    /**
+     * Find booking by Mercado Pago payment ID.
+     */
+    Optional<Booking> findByMercadoPagoPaymentId(String paymentId);
+
+    /**
+     * Check if a slot is already booked for a service.
+     * Returns true if there's an active (non-cancelled) booking for this slot.
+     */
+    boolean isTimeSlotAvailable(Long serviceId, LocalDate date, LocalTime startTime, LocalTime endTime);
+
+    /**
+     * Find all bookings (for admin).
+     */
+    List<Booking> findAll();
+
+    /**
+     * Find bookings by status (for admin filtering).
+     */
+    List<Booking> findByStatus(BookingStatus status);
+
+    List<Booking> findByDate(LocalDate date);
+
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/booking/web/BookingController.java ==========
+package com.flavia.dermobeauty.booking.web;
+
+import com.flavia.dermobeauty.booking.application.usecase.CreateBookingUseCase;
+import com.flavia.dermobeauty.booking.application.usecase.GetBookingByNumberUseCase;
+import com.flavia.dermobeauty.booking.domain.Booking;
+import com.flavia.dermobeauty.booking.web.dto.BookingResponse;
+import com.flavia.dermobeauty.booking.web.dto.CreateBookingRequest;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+/**
+ * REST controller for booking operations.
+ * Public endpoints for customers to create and check bookings.
+ */
+@Slf4j
+@RestController
+@RequestMapping("/api/public/bookings")
+@RequiredArgsConstructor
+public class BookingController {
+
+    private final CreateBookingUseCase createBookingUseCase;
+    private final GetBookingByNumberUseCase getBookingByNumberUseCase;
+
+    @PostMapping
+    public ResponseEntity<ApiResponse<BookingResponse>> createBooking(
+            @Valid @RequestBody CreateBookingRequest request) {
+
+        log.info("Creating booking for service {} on {} at {}",
+                request.getServiceId(), request.getBookingDate(), request.getBookingTime());
+
+        Booking booking = createBookingUseCase.execute(
+                request.getServiceId(),
+                request.getCustomerName(),
+                request.getCustomerEmail(),
+                request.getCustomerWhatsapp(),
+                request.getCustomerComments(),
+                request.getBookingDate(),
+                request.getBookingTime(),
+                request.getDurationMinutes(),
+                request.getAmount()
+        );
+
+        BookingResponse response = BookingResponse.fromDomain(booking);
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(ApiResponse.success(response, "Booking created successfully"));
+    }
+
+    @GetMapping("/{bookingNumber}")
+    public ResponseEntity<ApiResponse<BookingResponse>> getBookingByNumber(
+            @PathVariable String bookingNumber) {
+
+        log.debug("Fetching booking: {}", bookingNumber);
+
+        Booking booking = getBookingByNumberUseCase.execute(bookingNumber);
+        BookingResponse response = BookingResponse.fromDomain(booking);
+
+        return ResponseEntity.ok(ApiResponse.success(response));
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/booking/web/AvailabilityController.java ==========
+package com.flavia.dermobeauty.booking.web;
+
+import com.flavia.dermobeauty.booking.application.usecase.GetAvailableSlotsUseCase;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/public/availability")
+@RequiredArgsConstructor
+public class AvailabilityController {
+
+    private final GetAvailableSlotsUseCase getAvailableSlotsUseCase;
+
+    @GetMapping
+    public ResponseEntity<ApiResponse<List<LocalTime>>> getAvailability(
+            @RequestParam Long serviceId,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+
+        List<LocalTime> slots = getAvailableSlotsUseCase.execute(serviceId, date);
+        return ResponseEntity.ok(ApiResponse.success(slots));
+    }
+}
+========== FILE: src/main/java/com/flavia/dermobeauty/booking/application/port/NotificationService.java ==========
+package com.flavia.dermobeauty.booking.application.port;
+
+import com.flavia.dermobeauty.booking.domain.Booking;
+
+/**
+ * Port (interface) for notification operations.
+ * Will be implemented by the notification module infrastructure.
+ */
+public interface NotificationService {
+
+    /**
+     * Send booking confirmation email to customer.
+     *
+     * @param booking The confirmed booking
+     */
+    void sendBookingConfirmation(Booking booking);
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/booking/application/port/PaymentService.java ==========
+package com.flavia.dermobeauty.booking.application.port;
+
+import com.flavia.dermobeauty.booking.domain.Booking;
+
+/**
+ * Port (interface) for payment operations.
+ * Will be implemented by the payment module infrastructure.
+ */
+public interface PaymentService {
+
+    /**
+     * Create a Mercado Pago payment preference for a booking.
+     *
+     * @param booking The booking to create payment for
+     * @return Preference ID
+     */
+    String createBookingPreference(Booking booking);
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/security/config/SecurityConfig.java ==========
+package com.flavia.dermobeauty.security.config;
+
+import com.flavia.dermobeauty.security.jwt.JwtAuthenticationFilter;
+import lombok.RequiredArgsConstructor;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import java.util.List;
+
+/**
+ * Spring Security configuration for the application.
+ * Configures CORS, JWT authentication, and endpoint authorization.
+ */
+@Configuration
+@EnableWebSecurity
+@RequiredArgsConstructor
+public class SecurityConfig {
+
+    private final JwtAuthenticationFilter jwtAuthenticationFilter;
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+                .csrf(csrf -> csrf.disable())
+                .sessionManagement(session ->
+                        session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+                )
+                .authorizeHttpRequests(auth -> auth
+                        // Public endpoints
+                        .requestMatchers("/api/public/**").permitAll()
+                        .requestMatchers("/api/mp/webhook").permitAll()
+                        .requestMatchers("/api/auth/login").permitAll()
+                        .requestMatchers("/api/uploads/**").permitAll()
+                        .requestMatchers("/api/test/**").permitAll() // TODO: Remove in production!
+                        // Admin endpoints
+                        .requestMatchers("/api/admin/**").hasRole("ADMIN")
+                        // All other requests require authentication
+                        .anyRequest().authenticated()
+                )
+                .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }
+
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration configuration = new CorsConfiguration();
+        configuration.setAllowedOrigins(List.of("http://localhost:5173", "https://flaviadermobeauty.com","https://api.flaviadermobeauty.com"));
+        configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
+        configuration.setAllowedHeaders(List.of("*"));
+        configuration.setAllowCredentials(true);
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", configuration);
+        return source;
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/security/controller/AuthController.java ==========
+package com.flavia.dermobeauty.security.controller;
+
+import com.flavia.dermobeauty.security.dto.LoginRequest;
+import com.flavia.dermobeauty.security.dto.LoginResponse;
+import com.flavia.dermobeauty.security.jwt.JwtTokenProvider;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+/**
+ * Authentication controller for admin login.
+ * Validates hardcoded credentials and returns JWT token.
+ */
+@Slf4j
+@RestController
+@RequestMapping("/api/auth")
+@RequiredArgsConstructor
+public class AuthController {
+
+    private final JwtTokenProvider jwtTokenProvider;
+    private final PasswordEncoder passwordEncoder;
+
+    @Value("${admin.username}")
+    private String adminUsername;
+
+    @Value("${admin.password}")
+    private String adminPasswordHash;
+
+    @PostMapping("/login")
+    public ResponseEntity<ApiResponse<LoginResponse>> login(@Valid @RequestBody LoginRequest request) {
+        log.info("Login attempt for user: {}", request.getUsername());
+
+        if (!adminUsername.equals(request.getUsername())) {
+            log.warn("Login failed: Invalid username");
+            return ResponseEntity.status(401)
+                    .body(ApiResponse.success(null, "Invalid credentials"));
+        }
+
+        if (!passwordEncoder.matches(request.getPassword(), adminPasswordHash)) {
+            log.warn("Login failed: Invalid password");
+            return ResponseEntity.status(401)
+                    .body(ApiResponse.success(null, "Invalid credentials"));
+        }
+
+        String token = jwtTokenProvider.generateToken(adminUsername);
+        LoginResponse response = new LoginResponse(token, adminUsername, "ADMIN");
+
+        log.info("Login successful for user: {}", adminUsername);
+        return ResponseEntity.ok(ApiResponse.success(response));
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/config/repository/ConfigRepository.java ==========
+package com.flavia.dermobeauty.config.repository;
+
+import com.flavia.dermobeauty.config.domain.ConfigEntry;
+import org.springframework.data.jpa.repository.JpaRepository;
+import java.util.Optional;
+
+public interface ConfigRepository extends JpaRepository<ConfigEntry, Long> {
+    Optional<ConfigEntry> findByKey(String key);
+}
+========== FILE: src/main/java/com/flavia/dermobeauty/config/web/AdminConfigController.java ==========
+package com.flavia.dermobeauty.config.web;
+
+import com.flavia.dermobeauty.config.domain.ConfigEntry;
+import com.flavia.dermobeauty.config.repository.ConfigRepository;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import lombok.Data;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/admin/config")
+@RequiredArgsConstructor
+public class AdminConfigController {
+
+    private final ConfigRepository configRepository;
+
+    @GetMapping
+    public ResponseEntity<ApiResponse<List<ConfigEntry>>> getAllConfig() {
+        return ResponseEntity.ok(ApiResponse.success(configRepository.findAll()));
+    }
+
+    @PutMapping("/{key}")
+    public ResponseEntity<ApiResponse<ConfigEntry>> updateConfig(
+            @PathVariable String key,
+            @RequestBody UpdateConfigRequest request) {
+
+        ConfigEntry config = configRepository.findByKey(key)
+                .orElse(ConfigEntry.builder().key(key).build());
+
+        config.setValue(request.getValue());
+        // Descripción opcional, solo si es nuevo
+        if (config.getDescription() == null) {
+            config.setDescription("Configuración dinámica");
+        }
+
+        return ResponseEntity.ok(ApiResponse.success(configRepository.save(config)));
+    }
+
+    @Data
+    public static class UpdateConfigRequest {
+        private String value;
+    }
+}
+========== FILE: src/main/java/com/flavia/dermobeauty/shared/web/GlobalExceptionHandler.java ==========
+package com.flavia.dermobeauty.shared.web;
+
+import com.flavia.dermobeauty.shared.exception.DomainException;
+import com.flavia.dermobeauty.shared.exception.PaymentException;
+import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
+import com.flavia.dermobeauty.shared.exception.ValidationException;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Global exception handler for all REST controllers.
+ * Provides consistent error responses across the application.
+ */
+@Slf4j
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(ResourceNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleResourceNotFound(
+            ResourceNotFoundException ex,
+            HttpServletRequest request) {
+
+        log.warn("Resource not found: {}", ex.getMessage());
+
+        ErrorResponse error = new ErrorResponse(
+                "NOT_FOUND",
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+    }
+
+    @ExceptionHandler(ValidationException.class)
+    public ResponseEntity<ErrorResponse> handleValidation(
+            ValidationException ex,
+            HttpServletRequest request) {
+
+        log.warn("Validation error: {}", ex.getMessage());
+
+        ErrorResponse error = new ErrorResponse(
+                "VALIDATION_ERROR",
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ErrorResponse> handleMethodArgumentNotValid(
+            MethodArgumentNotValidException ex,
+            HttpServletRequest request) {
+
+        Map<String, String> fieldErrors = new HashMap<>();
+        ex.getBindingResult().getAllErrors().forEach(error -> {
+            String fieldName = ((FieldError) error).getField();
+            String errorMessage = error.getDefaultMessage();
+            fieldErrors.put(fieldName, errorMessage);
+        });
+
+        log.warn("Bean validation failed: {}", fieldErrors);
+
+        ErrorResponse error = new ErrorResponse(
+                "VALIDATION_ERROR",
+                "Invalid request data",
+                request.getRequestURI(),
+                fieldErrors
+        );
+
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+    }
+
+    @ExceptionHandler(PaymentException.class)
+    public ResponseEntity<ErrorResponse> handlePayment(
+            PaymentException ex,
+            HttpServletRequest request) {
+
+        log.error("Payment processing error: {}", ex.getMessage(), ex);
+
+        ErrorResponse error = new ErrorResponse(
+                "PAYMENT_ERROR",
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(error);
+    }
+
+    @ExceptionHandler(DomainException.class)
+    public ResponseEntity<ErrorResponse> handleDomain(
+            DomainException ex,
+            HttpServletRequest request) {
+
+        log.warn("Domain exception: {}", ex.getMessage());
+
+        ErrorResponse error = new ErrorResponse(
+                "BUSINESS_RULE_VIOLATION",
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(error);
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ErrorResponse> handleGeneral(
+            Exception ex,
+            HttpServletRequest request) {
+
+        log.error("Unexpected error", ex);
+
+        ErrorResponse error = new ErrorResponse(
+                "INTERNAL_ERROR",
+                "An unexpected error occurred. Please try again later.",
+                request.getRequestURI()
+        );
+
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/sales/infrastructure/persistence/OrderEntity.java ==========
+package com.flavia.dermobeauty.sales.infrastructure.persistence;
+
+import com.flavia.dermobeauty.booking.domain.PaymentStatus;
+import com.flavia.dermobeauty.sales.domain.DeliveryType;
+import com.flavia.dermobeauty.sales.domain.OrderStatus;
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * JPA entity for orders table.
+ * Infrastructure layer representation of Order aggregate.
+ */
+@Entity
+@Table(name = "orders")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class OrderEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "order_number", nullable = false, unique = true, length = 50)
+    private String orderNumber;
+
+    // Customer information
+    @Column(name = "customer_name", nullable = false, length = 200)
+    private String customerName;
+
+    @Column(name = "customer_email", nullable = false, length = 200)
+    private String customerEmail;
+
+    @Column(name = "customer_whatsapp", nullable = false, length = 50)
+    private String customerWhatsapp;
+
+    // Delivery information
+    @Enumerated(EnumType.STRING)
+    @Column(name = "delivery_type", nullable = false, length = 20)
+    private DeliveryType deliveryType;
+
+    @Column(name = "delivery_address_street", length = 300)
+    private String deliveryAddress;
+
+    @Column(name = "delivery_address_city", length = 100)
+    private String deliveryCity;
+
+    @Column(name = "delivery_address_postal_code", length = 20)
+    private String deliveryPostalCode;
+
+    @Column(name = "delivery_address_state", length = 100)
+    private String deliveryProvince;
+
+    @Column(name = "delivery_notes", columnDefinition = "TEXT")
+    private String deliveryNotes;
+
+    // Order items (OneToMany relationship)
+    @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
+    @Builder.Default
+    @ToString.Exclude
+    private List<OrderItemEntity> items = new ArrayList<>();
+
+    // Pricing
+    @Column(nullable = false, precision = 10, scale = 2)
+    private BigDecimal subtotal;
+
+    @Column(name = "delivery_cost", nullable = false, precision = 10, scale = 2)
+    private BigDecimal deliveryCost;
+
+    @Column(nullable = false, precision = 10, scale = 2)
+    private BigDecimal total;
+
+    // Status tracking
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private OrderStatus status;
+
+    // Payment information
+    @Enumerated(EnumType.STRING)
+    @Column(name = "payment_status", nullable = false, length = 20)
+    private PaymentStatus paymentStatus;
+
+    @Column(name = "mercadopago_preference_id", length = 200)
+    private String mercadoPagoPreferenceId;
+
+    @Column(name = "mercadopago_payment_id", length = 200)
+    private String mercadoPagoPaymentId;
+
+    // Timestamps
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private LocalDateTime updatedAt;
+
+    @PrePersist
+    protected void onCreate() {
+        if (createdAt == null) {
+            createdAt = LocalDateTime.now();
+        }
+        if (updatedAt == null) {
+            updatedAt = LocalDateTime.now();
+        }
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
+
+    /**
+     * Helper method to add item and maintain bidirectional relationship.
+     */
+    public void addItem(OrderItemEntity item) {
+        items.add(item);
+        item.setOrder(this);
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/sales/infrastructure/persistence/OrderItemEntity.java ==========
+package com.flavia.dermobeauty.sales.infrastructure.persistence;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+/**
+ * JPA entity for order_items table.
+ * Part of Order aggregate in infrastructure layer.
+ */
+@Entity
+@Table(name = "order_items")
+@Getter@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class OrderItemEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "order_id", nullable = false)
+    @ToString.Exclude
+    private OrderEntity order;
+
+    @Column(name = "product_id", nullable = false)
+    private Long productId;
+
+    // Snapshot of product at time of order
+    @Column(name = "product_name", nullable = false, length = 200)
+    private String productName;
+
+    @Column(name = "product_price", nullable = false, precision = 10, scale = 2)
+    private BigDecimal productPrice;
+
+    @Column(nullable = false)
+    private Integer quantity;
+
+    @Column(nullable = false, precision = 10, scale = 2)
+    private BigDecimal subtotal;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+
+    @PrePersist
+    protected void onCreate() {
+        if (createdAt == null) {
+            createdAt = LocalDateTime.now();
+        }
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/sales/infrastructure/persistence/JpaOrderRepository.java ==========
+package com.flavia.dermobeauty.sales.infrastructure.persistence;
+
+import com.flavia.dermobeauty.sales.domain.OrderStatus;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Spring Data JPA repository for OrderEntity.
+ * Infrastructure implementation detail.
+ */
+@Repository
+public interface JpaOrderRepository extends JpaRepository<OrderEntity, Long> {
+
+    Optional<OrderEntity> findByOrderNumber(String orderNumber);
+
+    Optional<OrderEntity> findByMercadoPagoPaymentId(String paymentId);
+
+    List<OrderEntity> findByStatus(OrderStatus status);
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/sales/infrastructure/notification/StubOrderNotificationService.java ==========
+package com.flavia.dermobeauty.sales.infrastructure.notification;
+
+import com.flavia.dermobeauty.sales.application.port.NotificationService;
+import com.flavia.dermobeauty.sales.domain.Order;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+/**
+ * Stub implementation of NotificationService for Phase 6.
+ * Will be replaced with full email implementation in Phase 8.
+ */
+@Slf4j
+@Service("orderNotificationService")
+public class StubOrderNotificationService implements NotificationService {
+
+    @Override
+    public void sendOrderConfirmation(Order order) {
+        log.info("STUB: Would send order confirmation email for {} to {}",
+                order.getOrderNumber(),
+                order.getCustomerInfo().getEmail());
+
+        // No-op for now - will implement email sending in Phase 8
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/sales/config/SalesConfig.java ==========
+package com.flavia.dermobeauty.sales.config;
+
+import com.flavia.dermobeauty.catalog.repository.ProductRepository;
+import com.flavia.dermobeauty.sales.application.port.DeliveryCostCalculator;
+import com.flavia.dermobeauty.sales.application.port.NotificationService;
+import com.flavia.dermobeauty.sales.application.port.StockService;
+import com.flavia.dermobeauty.sales.application.usecase.*;
+import com.flavia.dermobeauty.sales.domain.OrderRepository;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+/**
+ * Configuration class for Sales module.
+ * Wires use cases as Spring beans for dependency injection.
+ */
+@Configuration
+public class SalesConfig {
+
+    @Bean
+    public CreateOrderUseCase createOrderUseCase(
+            OrderRepository orderRepository,
+            ProductRepository productRepository,
+            StockService stockService,
+            DeliveryCostCalculator deliveryCostCalculator) {
+        return new CreateOrderUseCase(orderRepository, productRepository, stockService, deliveryCostCalculator);
+    }
+
+    @Bean
+    public ConfirmOrderPaymentUseCase confirmOrderPaymentUseCase(
+            OrderRepository orderRepository,
+            StockService stockService,
+            @Qualifier("orderNotificationService") NotificationService notificationService) {
+        return new ConfirmOrderPaymentUseCase(orderRepository, stockService, notificationService);
+    }
+
+    @Bean
+    public UpdateOrderStatusUseCase updateOrderStatusUseCase(OrderRepository orderRepository) {
+        return new UpdateOrderStatusUseCase(orderRepository);
+    }
+
+    @Bean
+    public ListOrdersUseCase listOrdersUseCase(OrderRepository orderRepository) {
+        return new ListOrdersUseCase(orderRepository);
+    }
+
+    @Bean
+    public GetOrderByNumberUseCase getOrderByNumberUseCase(OrderRepository orderRepository) {
+        return new GetOrderByNumberUseCase(orderRepository);
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/sales/domain/OrderRepository.java ==========
+package com.flavia.dermobeauty.sales.domain;
+
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Repository port (interface) for Order aggregate.
+ * Defines operations needed by the domain layer without specifying implementation.
+ * Implementation will be provided by infrastructure layer.
+ */
+public interface OrderRepository {
+
+    /**
+     * Save an order (create or update).
+     */
+    Order save(Order order);
+
+    /**
+     * Find order by ID.
+     */
+    Optional<Order> findById(Long id);
+
+    /**
+     * Find order by order number.
+     */
+    Optional<Order> findByOrderNumber(String orderNumber);
+
+    /**
+     * Find order by Mercado Pago payment ID.
+     */
+    Optional<Order> findByMercadoPagoPaymentId(String paymentId);
+
+    /**
+     * Find all orders (for admin).
+     */
+    List<Order> findAll();
+
+    /**
+     * Find orders by status (for admin filtering).
+     */
+    List<Order> findByStatus(OrderStatus status);
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/sales/web/OrderController.java ==========
+package com.flavia.dermobeauty.sales.web;
+
+import com.flavia.dermobeauty.sales.application.usecase.CreateOrderUseCase;
+import com.flavia.dermobeauty.sales.application.usecase.GetOrderByNumberUseCase;
+import com.flavia.dermobeauty.sales.domain.Order;
+import com.flavia.dermobeauty.sales.web.dto.CreateOrderRequest;
+import com.flavia.dermobeauty.sales.web.dto.OrderItemRequest;
+import com.flavia.dermobeauty.sales.web.dto.OrderResponse;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+/**
+ * REST controller for order operations.
+ * Public endpoints for customers to create and check orders.
+ */
+@Slf4j
+@RestController
+@RequestMapping("/api/public/orders")
+@RequiredArgsConstructor
+public class OrderController {
+
+    private final CreateOrderUseCase createOrderUseCase;
+    private final GetOrderByNumberUseCase getOrderByNumberUseCase;
+
+    @PostMapping
+    public ResponseEntity<ApiResponse<OrderResponse>> createOrder(
+            @Valid @RequestBody CreateOrderRequest request) {
+
+        log.info("Creating order for customer: {}", request.getCustomerEmail());
+
+        List<CreateOrderUseCase.OrderItemRequest> itemRequests = request.getItems().stream()
+                .map(item -> new CreateOrderUseCase.OrderItemRequest(item.getProductId(), item.getQuantity()))
+                .collect(Collectors.toList());
+
+        Order order = createOrderUseCase.execute(
+                request.getCustomerName(),
+                request.getCustomerEmail(),
+                request.getCustomerWhatsapp(),
+                request.getDeliveryType(),
+                request.getDeliveryAddress(),
+                request.getDeliveryCity(),
+                request.getDeliveryPostalCode(),
+                request.getDeliveryProvince(),
+                request.getDeliveryNotes(),
+                itemRequests
+        );
+
+        OrderResponse response = OrderResponse.fromDomain(order);
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(ApiResponse.success(response, "Order created successfully"));
+    }
+
+    @GetMapping("/{orderNumber}")
+    public ResponseEntity<ApiResponse<OrderResponse>> getOrderByNumber(
+            @PathVariable String orderNumber) {
+
+        log.debug("Fetching order: {}", orderNumber);
+
+        Order order = getOrderByNumberUseCase.execute(orderNumber);
+        OrderResponse response = OrderResponse.fromDomain(order);
+
+        return ResponseEntity.ok(ApiResponse.success(response));
+    }
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/sales/web/AdminOperationsController.java ==========
+package com.flavia.dermobeauty.sales.web;
+
+import com.flavia.dermobeauty.booking.application.usecase.CancelBookingUseCase;
+import com.flavia.dermobeauty.booking.application.usecase.ListBookingsUseCase;
+import com.flavia.dermobeauty.booking.domain.Booking;
+import com.flavia.dermobeauty.booking.web.dto.BookingResponse;
+import com.flavia.dermobeauty.sales.application.usecase.ListOrdersUseCase;
+import com.flavia.dermobeauty.sales.application.usecase.UpdateOrderStatusUseCase;
+import com.flavia.dermobeauty.sales.domain.Order;
+import com.flavia.dermobeauty.sales.domain.OrderStatus;
+import com.flavia.dermobeauty.sales.web.dto.OrderResponse;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import lombok.Data;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/api/admin")
+@RequiredArgsConstructor
+public class AdminOperationsController {
+
+    private final ListBookingsUseCase listBookingsUseCase;
+    private final CancelBookingUseCase cancelBookingUseCase;
+    private final ListOrdersUseCase listOrdersUseCase;
+    private final UpdateOrderStatusUseCase updateOrderStatusUseCase;
+
+    // ==================== BOOKINGS ====================
+
+    @GetMapping("/bookings")
+    public ResponseEntity<ApiResponse<List<BookingResponse>>> getBookings() {
+        List<BookingResponse> bookings = listBookingsUseCase.execute().stream()
+                .map(BookingResponse::fromDomain)
+                .collect(Collectors.toList());
+        return ResponseEntity.ok(ApiResponse.success(bookings));
+    }
+
+    @DeleteMapping("/bookings/{id}")
+    public ResponseEntity<ApiResponse<Void>> cancelBooking(@PathVariable Long id) {
+        cancelBookingUseCase.execute(id);
+        return ResponseEntity.ok(ApiResponse.success("Turno cancelado"));
+    }
+
+    // ==================== ORDERS ====================
+
+    @GetMapping("/orders")
+    public ResponseEntity<ApiResponse<List<OrderResponse>>> getOrders() {
+        List<OrderResponse> orders = listOrdersUseCase.execute().stream()
+                .map(OrderResponse::fromDomain)
+                .collect(Collectors.toList());
+        return ResponseEntity.ok(ApiResponse.success(orders));
+    }
+
+    @PatchMapping("/orders/{id}/status")
+    public ResponseEntity<ApiResponse<OrderResponse>> updateOrderStatus(
+            @PathVariable Long id,
+            @RequestBody UpdateStatusRequest request) {
+
+        Order updated = updateOrderStatusUseCase.execute(id, request.getStatus());
+        return ResponseEntity.ok(ApiResponse.success(OrderResponse.fromDomain(updated)));
+    }
+
+    @Data
+    public static class UpdateStatusRequest {
+        private OrderStatus status;
+    }
+}
+========== FILE: src/main/java/com/flavia/dermobeauty/sales/application/port/StockService.java ==========
+package com.flavia.dermobeauty.sales.application.port;
+
+/**
+ * Port (interface) for stock management operations.
+ * Will be implemented by the catalog infrastructure.
+ */
+public interface StockService {
+
+    /**
+     * Check if sufficient stock is available for a product.
+     *
+     * @param productId Product ID
+     * @param quantity  Requested quantity
+     * @return true if stock available, false otherwise
+     */
+    boolean checkAvailability(Long productId, Integer quantity);
+
+    /**
+     * Decrement stock for a product.
+     * Should be called after payment confirmation.
+     *
+     * @param productId Product ID
+     * @param quantity  Quantity to decrement
+     */
+    void decrementStock(Long productId, Integer quantity);
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/sales/application/port/NotificationService.java ==========
+package com.flavia.dermobeauty.sales.application.port;
+
+import com.flavia.dermobeauty.sales.domain.Order;
+
+/**
+ * Port (interface) for notification operations.
+ * Will be implemented by the notification module infrastructure.
+ */
+public interface NotificationService {
+
+    /**
+     * Send order confirmation email to customer.
+     *
+     * @param order The confirmed order
+     */
+    void sendOrderConfirmation(Order order);
+}
+
+========== FILE: src/main/java/com/flavia/dermobeauty/sales/application/port/PaymentService.java ==========
+package com.flavia.dermobeauty.sales.application.port;
+
+import com.flavia.dermobeauty.sales.domain.Order;
+
+/**
+ * Port (interface) for payment operations.
+ * Will be implemented by the payment module infrastructure.
+ */
+public interface PaymentService {
+
+    /**
+     * Create a Mercado Pago payment preference for an order.
+     *
+     * @param order The order to create payment for
+     * @return Preference ID
+     */
+    String createOrderPreference(Order order);
+}
+
+========== FILE: src/main/resources/application-dev.yml ==========
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/dermobeauty_dev
+    username: dermobeauty
+    password: dermobeauty
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+  mail:
+    host: smtp.gmail.com
+    port: 587
+    username: 'flavia.dermobeauty@gmail.com'
+    password: 'qajp ptwr gdjg uozl'
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+            required: true
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
+
+# Admin credentials (change in production!)
+admin:
+  username: admin
+  # BCrypt hash for "admin123" (verified)
+  password: $2a$10$OQlalRpvK3/0ikEa3xO62ujds5OHSF723wIXh3gIk7ca7nJmp0c9q
+
+# JWT configuration
+jwt:
+  secret: flavia-dermobeauty-jwt-secret-key-change-in-production-2024
+  expiration: 86400000 # 24 hours in milliseconds
+
+# Mercado Pago configuration
+mercadopago:
+  access-token: APP_USR-3480197543728175-092819-981988e8773a0af18511e1e610ba5f23-2719878562
+  base-url: https://flaviadermobeauty.com
+
+# Application settings
+app:
+  api-url: https://api.flaviadermobeauty.com
+  upload-dir: ./uploads
+  email:
+    from: flavia.dermobeauty@gmail.com
+    from-name: Flavia Dermobeauty
+  delivery:
+    fixed-cost: 1500.00
+
+# Logging
+logging:
+  level:
+    com.flavia.dermobeauty: DEBUG
+    org.springframework.web: INFO
+    org.hibernate.SQL: DEBUG
+
+========== FILE: src/main/resources/application.yml ==========
+spring:
+  application:
+    name: dermobeauty
+  profiles:
+    active: dev
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 10MB
+
+server:
+  port: 8080
+  error:
+    include-message: always
+    include-binding-errors: always

@@ -1,0 +1,123 @@
+@import "tailwindcss/base";
+@import "tailwindcss/components";
+@import "tailwindcss/utilities";
+
+@layer base {
+  body {
+    @apply bg-background text-primary font-sans antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-serif font-semibold tracking-tight;
+  }
+
+  /* Scrollbar elegante y fina para el admin */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 rounded-full hover:bg-gray-400 transition;
+  }
+
+}
+
+@layer components {
+  .form-input {
+    @apply w-full px-4 py-2.5 bg-white border border-gray-200 rounded-lg text-gray-900 focus:ring-2 focus:ring-primary/20 focus:border-primary focus:outline-none transition-all placeholder:text-gray-300;
+  }
+
+  .form-textarea {
+    @apply w-full px-4 py-3 bg-white border border-gray-200 rounded-lg text-gray-900 focus:ring-2 focus:ring-primary/20 focus:border-primary focus:outline-none transition-all placeholder:text-gray-300 resize-y min-h-[100px];
+  }
+
+  /* Diagonal Stripe Pattern for Blocked/Unavailable Time Slots */
+  .diagonal-stripes {
+    background-image: repeating-linear-gradient(
+      45deg,
+      transparent,
+      transparent 10px,
+      rgba(156, 163, 175, 0.15) 10px,
+      rgba(156, 163, 175, 0.15) 20px
+    );
+    position: relative;
+  }
+
+  /* Alternative: Thicker stripes for better visibility */
+  .diagonal-stripes-thick {
+    background-image: repeating-linear-gradient(
+      45deg,
+      transparent,
+      transparent 8px,
+      rgba(156, 163, 175, 0.25) 8px,
+      rgba(156, 163, 175, 0.25) 16px
+    );
+  }
+
+  /* Shadow lift effect for draggable elements */
+  .draggable-shadow {
+    @apply transition-shadow duration-200;
+  }
+
+  .draggable-shadow:hover {
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+  }
+
+  /* Pulse animation for current time indicator */
+  @keyframes pulse-slow {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.7;
+    }
+  }
+
+  .pulse-slow {
+    animation: pulse-slow 2s ease-in-out infinite;
+  }
+}
+
+@layer utilities {
+  /* Hide scrollbar but keep functionality */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Smooth scroll behavior */
+  .scroll-smooth {
+    scroll-behavior: smooth;
+  }
+
+  /* Fade in animation */
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-fade-in {
+    animation: fade-in 0.3s ease-out;
+  }
+
+  /* Calendar grid helper */
+  .calendar-grid-line {
+    @apply border-b border-gray-100 relative;
+  }
+
+  .calendar-grid-line:nth-child(even) {
+    @apply bg-gray-50/30;
+  }
+}

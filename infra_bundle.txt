@@ -1,0 +1,42 @@
+========== FILE: ./docker-compose.dev.yml ==========
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dermobeauty-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: dermobeauty_dev
+      POSTGRES_USER: dermobeauty
+      POSTGRES_PASSWORD: dermobeauty
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dermobeauty -d dermobeauty_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dermobeauty-network
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: dermobeauty-mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"  # SMTP server
+      - "8025:8025"  # Web UI
+    networks:
+      - dermobeauty-network
+
+volumes:
+  postgres_data:
+
+networks:
+  dermobeauty-network:
+    driver: bridge
+
+

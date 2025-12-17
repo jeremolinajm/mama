@@ -1,0 +1,47 @@
+package com.flavia.dermobeauty.booking.infrastructure.persistence;
+
+import com.flavia.dermobeauty.booking.domain.BookingStatus;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Spring Data JPA repository for BookingEntity.
+ * Infrastructure implementation detail.
+ */
+@Repository
+public interface JpaBookingRepository extends JpaRepository<BookingEntity, Long> {
+
+    Optional<BookingEntity> findByBookingNumber(String bookingNumber);
+
+    Optional<BookingEntity> findByMercadoPagoPaymentId(String paymentId);
+
+    List<BookingEntity> findByStatus(BookingStatus status);
+
+    List<BookingEntity> findByBookingDateAndStatusNot(LocalDate bookingDate, BookingStatus status);
+
+    // Un turno se solapa si: (StartA < EndB) y (StartB < EndA)
+    @Query(value = """
+           SELECT CASE WHEN COUNT(*) > 0 THEN true ELSE false END
+           FROM bookings b
+           WHERE b.service_id = :serviceId
+           AND b.booking_date = :date
+           AND b.status != 'CANCELLED'
+           AND (
+               b.booking_time < :endTime
+               AND :startTime < (b.booking_time + (b.duration_minutes * interval '1 minute'))
+           )
+           """, nativeQuery = true)
+    boolean existsOverlappingBooking(
+            @Param("serviceId") Long serviceId,
+            @Param("date") LocalDate date,
+            @Param("startTime") LocalTime startTime,
+            @Param("endTime") LocalTime endTime
+    );
+}
