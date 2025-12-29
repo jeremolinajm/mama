@@ -122,6 +122,7 @@ public class ProductCatalogService {
                 .description(dto.getDescription())
                 .shortDescription(dto.getShortDescription())
                 .price(dto.getPrice())
+                .offerPrice(dto.getOfferPrice())
                 .stock(dto.getStock() != null ? dto.getStock() : 0)
                 .category(category)
                 .imageUrl(dto.getImageUrl())
@@ -152,6 +153,7 @@ public class ProductCatalogService {
         entity.setDescription(dto.getDescription());
         entity.setShortDescription(dto.getShortDescription());
         entity.setPrice(dto.getPrice());
+        entity.setOfferPrice(dto.getOfferPrice());
         entity.setStock(dto.getStock());
         entity.setImageUrl(dto.getImageUrl());
         entity.setIsFeatured(dto.getIsFeatured());

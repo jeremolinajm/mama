@@ -42,6 +42,13 @@ public class ServiceEntity {
     @Column(nullable = false, precision = 10, scale = 2)
     private BigDecimal price;
 
+    @Column(name = "offer_price", precision = 10, scale = 2)
+    private BigDecimal offerPrice;
+
+    @Builder.Default
+    @Column(name = "is_offer", nullable = false)
+    private Boolean isOffer = false;
+
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "category_id", nullable = false)
     @ToString.Exclude

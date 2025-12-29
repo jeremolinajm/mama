@@ -2,17 +2,18 @@ import { useState } from 'react';
 import { Outlet, Navigate, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Toaster } from 'sonner';
-import { 
-  LayoutDashboard, 
-  CalendarDays, 
-  ShoppingBag, 
-  Sparkles, 
-  Package, 
-  Settings, 
-  Menu, 
-  X, 
+import {
+  LayoutDashboard,
+  CalendarDays,
+  ShoppingBag,
+  Sparkles,
+  Package,
+  Settings,
+  Menu,
+  X,
   LogOut,
-  User
+  User,
+  Tag
 } from 'lucide-react';
 
 // Tipado para los items del menú
@@ -78,6 +79,7 @@ const SidebarContent = ({ onItemClick }: { onItemClick?: () => void }) => {
         </div>
         <LinkItem to="/admin/servicios" icon={Sparkles} label="Servicios" onClick={onItemClick} />
         <LinkItem to="/admin/productos" icon={Package} label="Productos" onClick={onItemClick} />
+        <LinkItem to="/admin/categorias" icon={Tag} label="Categorías" onClick={onItemClick} />
         
         <div className="pt-6 pb-2 px-4">
           <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Sistema</p>

@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import { useCart } from '../../context/CartContext';
 import type { Product } from '../../types/domain';
+import { resolveImageUrl } from '../../utils/imageUtils';
 
 interface ProductoCardProps {
   product: Product;
@@ -53,7 +54,7 @@ export default function ProductoCard({ product }: ProductoCardProps) {
         )}
 
         <img
-          src={product.imageUrl || '/placeholder.jpg'}
+          src={resolveImageUrl(product.imageUrl) || '/placeholder.jpg'}
           alt={product.name}
           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700"
           onError={(e) => (e.currentTarget.src = 'https://placehold.co/400x400/F9F7F5/E5989B?text=Producto')}
@@ -73,9 +74,22 @@ export default function ProductoCard({ product }: ProductoCardProps) {
 
         {/* 3. PRECIO Y ACCIÓN (Sticky Bottom) */}
         <div className="mt-auto pt-2 flex items-center justify-between gap-3">
-          <span className="font-sans font-bold text-xl text-primary">
-            ${product.price}
-          </span>
+          <div className="flex items-baseline gap-2">
+            {product.isOffer && product.offerPrice ? (
+              <>
+                <span className="font-sans font-bold text-xl text-accent">
+                  ${product.offerPrice}
+                </span>
+                <span className="font-sans text-sm text-gray-400 line-through">
+                  ${product.price}
+                </span>
+              </>
+            ) : (
+              <span className="font-sans font-bold text-xl text-primary">
+                ${product.price}
+              </span>
+            )}
+          </div>
 
           {/* ZONA DE ACCIÓN: Aquí ocurre la magia */}
           {quantityInCart > 0 ? (

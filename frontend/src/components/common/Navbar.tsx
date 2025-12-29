@@ -45,8 +45,8 @@ export default function Navbar() {
               className="relative group p-2 text-primary hover:text-accent transition-colors"
               aria-label="Ver carrito"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 10.5V6a3.75 3.75 0 10-7.5 0v4.5m11.356-1.993l1.263 5c.07.286-.06.591-.292.684l-1.428.571M12 18.75a6 6 0 006-6M12 18.75a6 6 0 01-6-6m0 0V6m0 0A2.25 2.25 0 0113.5 2.25H15" />
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6">
+                <circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/>
               </svg>
               
               {itemCount > 0 && (
@@ -142,8 +142,8 @@ export default function Navbar() {
               <div className="flex items-center gap-2">
                 <span className="text-sm text-gray-500">{itemCount} items</span>
                 <div className="bg-accent/10 p-2 rounded-full text-accent">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 10.5V6a3.75 3.75 0 10-7.5 0v4.5m11.356-1.993l1.263 5c.07.286-.06.591-.292.684l-1.428.571M12 18.75a6 6 0 006-6M12 18.75a6 6 0 01-6-6m0 0V6m0 0A2.25 2.25 0 0113.5 2.25H15" />
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+                        <circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/>
                     </svg>
                 </div>
               </div>

@@ -5,6 +5,8 @@ import com.flavia.dermobeauty.booking.application.usecase.GetBookingByNumberUseC
 import com.flavia.dermobeauty.booking.domain.Booking;
 import com.flavia.dermobeauty.booking.web.dto.BookingResponse;
 import com.flavia.dermobeauty.booking.web.dto.CreateBookingRequest;
+import com.flavia.dermobeauty.catalog.dto.ServiceDto;
+import com.flavia.dermobeauty.catalog.service.ServiceCatalogService;
 import com.flavia.dermobeauty.shared.web.ApiResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -25,6 +27,7 @@ public class BookingController {
 
     private final CreateBookingUseCase createBookingUseCase;
     private final GetBookingByNumberUseCase getBookingByNumberUseCase;
+    private final ServiceCatalogService serviceCatalogService;
 
     @PostMapping
     public ResponseEntity<ApiResponse<BookingResponse>> createBooking(
@@ -33,8 +36,12 @@ public class BookingController {
         log.info("Creating booking for service {} on {} at {}",
                 request.getServiceId(), request.getBookingDate(), request.getBookingTime());
 
+        // Fetch service to get the name snapshot
+        ServiceDto service = serviceCatalogService.getById(request.getServiceId());
+
         Booking booking = createBookingUseCase.execute(
                 request.getServiceId(),
+                service.getName(),
                 request.getCustomerName(),
                 request.getCustomerEmail(),
                 request.getCustomerWhatsapp(),

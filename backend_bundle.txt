@@ -2902,6 +2902,38 @@ server:
     include-binding-errors: always
 
 
+========== FILE: ./Dockerfile ==========
+# Multi-stage build for Spring Boot application
+FROM maven:3.9-eclipse-temurin-21-alpine AS build
+
+WORKDIR /app
+
+# Copy pom.xml and download dependencies (layer caching)
+COPY pom.xml .
+RUN mvn dependency:go-offline -B
+
+# Copy source code and build
+COPY src ./src
+RUN mvn clean package -DskipTests
+
+# Runtime stage
+FROM eclipse-temurin:21-jre-alpine
+
+WORKDIR /app
+
+# Create uploads directory
+RUN mkdir -p /app/uploads
+
+# Copy JAR from build stage
+COPY --from=build /app/target/*.jar app.jar
+
+# Expose port
+EXPOSE 8080
+
+# Run the application
+ENTRYPOINT ["java", "-jar", "app.jar"]
+
+
 ========== FILE: ./.gitignore ==========
 HELP.md
 target/
@@ -3124,6 +3156,167 @@ public interface PaymentService {
 }
 
 
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/application/usecase/BlockScheduleUseCase.java ==========
+package com.flavia.dermobeauty.booking.application.usecase;
+
+import com.flavia.dermobeauty.booking.domain.*;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.util.List;
+import java.util.UUID;
+
+/**
+ * Use Case: Block an entire day or specific time range.
+ * Creates a special BLOCKED booking to prevent customer bookings.
+ * Used for holidays, personal days, or maintenance periods.
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class BlockScheduleUseCase {
+
+    private final BookingRepository bookingRepository;
+
+    /**
+     * Blocks an entire day by creating a BLOCKED booking spanning the full business hours.
+     *
+     * @param date the date to block
+     * @param reason optional reason for blocking (e.g., "Holiday - Christmas")
+     * @return the created block booking
+     */
+    public Booking executeBlockFullDay(LocalDate date, String reason) {
+        return executeBlockTimeRange(
+                date,
+                LocalTime.of(0, 0),   // Block from midnight
+                LocalTime.of(23, 59), // to end of day
+                reason
+        );
+    }
+
+    /**
+     * Blocks a specific time range on a date.
+     *
+     * @param date the date to block
+     * @param startTime start time of block
+     * @param endTime end time of block
+     * @param reason optional reason for blocking
+     * @return the created block booking
+     */
+    public Booking executeBlockTimeRange(
+            LocalDate date,
+            LocalTime startTime,
+            LocalTime endTime,
+            String reason
+    ) {
+        log.info("Blocking schedule for {} from {} to {}. Reason: {}",
+                date, startTime, endTime, reason);
+
+        // Calculate duration in minutes
+        int durationMinutes = (int) java.time.Duration.between(startTime, endTime).toMinutes();
+
+        // Create time slot
+        TimeSlot timeSlot = new TimeSlot(date, startTime);
+
+        // Create customer info for the block
+        CustomerInfo blockInfo = new CustomerInfo(
+                reason != null && !reason.isBlank() ? reason : "BLOQUEO AGENDA",
+                "admin@interno.com",
+                "00000000",
+                "Horario bloqueado por administrador"
+        );
+
+        // Create the BLOCKED booking
+        Booking blockBooking = Booking.builder()
+                .bookingNumber("BLOCK-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase())
+                .serviceId(null) // No service associated
+                .customerInfo(blockInfo)
+                .timeSlot(timeSlot)
+                .durationMinutes(durationMinutes)
+                .status(BookingStatus.BLOCKED)
+                .paymentStatus(PaymentStatus.NOT_REQUIRED)
+                .amount(BigDecimal.ZERO)
+                .createdAt(LocalDateTime.now())
+                .updatedAt(LocalDateTime.now())
+                .build();
+
+        // Persist
+        Booking saved = bookingRepository.save(blockBooking);
+        log.info("Schedule blocked successfully with booking number: {}", saved.getBookingNumber());
+
+        return saved;
+    }
+
+    /**
+     * Unblocks a day by deleting all BLOCKED bookings for that date.
+     *
+     * @param date the date to unblock
+     */
+    public void executeUnblockDay(LocalDate date) {
+        log.info("Unblocking schedule for {}", date);
+
+        List<Booking> blockedBookings = bookingRepository.findByDate(date).stream()
+                .filter(b -> b.getStatus() == BookingStatus.BLOCKED)
+                .toList();
+
+        blockedBookings.forEach(booking -> {
+            booking.cancel(); // Reuse cancel logic
+            bookingRepository.save(booking);
+        });
+
+        log.info("Removed {} blocked time slots for {}", blockedBookings.size(), date);
+    }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/application/usecase/CancelBlockUseCase.java ==========
+package com.flavia.dermobeauty.booking.application.usecase;
+
+import com.flavia.dermobeauty.booking.domain.Block;
+import com.flavia.dermobeauty.booking.domain.BlockRepository;
+import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * Use case for cancelling a block.
+ * Marks the block as CANCELLED (soft delete).
+ */
+@SuppressWarnings("ClassCanBeRecord")
+@Slf4j
+@RequiredArgsConstructor
+public class CancelBlockUseCase {
+
+    private final BlockRepository blockRepository;
+
+    /**
+     * Cancels a block by ID.
+     *
+     * @param blockId the ID of the block to cancel
+     * @return the cancelled block
+     * @throws ResourceNotFoundException if block not found
+     */
+    public Block execute(Long blockId) {
+        log.info("Cancelling block with ID: {}", blockId);
+
+        Block block = blockRepository.findById(blockId)
+                .orElseThrow(() -> new ResourceNotFoundException("Block", blockId));
+
+        block.cancel();
+
+        Block saved = blockRepository.save(block);
+        log.info("Block cancelled successfully: {}", saved.getBlockNumber());
+
+        return saved;
+    }
+}
+
+
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/application/usecase/CancelBookingUseCase.java ==========
 package com.flavia.dermobeauty.booking.application.usecase;
 
@@ -3209,29 +3402,133 @@ public class ConfirmBookingPaymentUseCase {
 }
 
 
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/application/usecase/CreateBlockUseCase.java ==========
+package com.flavia.dermobeauty.booking.application.usecase;
+
+import com.flavia.dermobeauty.booking.domain.Block;
+import com.flavia.dermobeauty.booking.domain.BlockRepository;
+import com.flavia.dermobeauty.booking.domain.BookingRepository;
+import com.flavia.dermobeauty.shared.exception.ConflictException;
+import com.flavia.dermobeauty.shared.exception.ValidationException;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import java.time.OffsetDateTime;
+import java.util.UUID;
+
+/**
+ * Use case for creating a new block (time slot reservation).
+ * Validates alignment rules and checks for collisions with bookings and other blocks.
+ */
+@SuppressWarnings("ClassCanBeRecord")
+@Slf4j
+@RequiredArgsConstructor
+public class CreateBlockUseCase {
+
+    private final BlockRepository blockRepository;
+    private final BookingRepository bookingRepository;
+
+    /**
+     * Creates a new block.
+     *
+     * @param startAt start time (must be aligned to 30-min intervals)
+     * @param endAt end time (must be aligned to 30-min intervals, must be after startAt)
+     * @param reason reason for the block (required)
+     * @return the created block
+     * @throws ValidationException if alignment or time rules are violated
+     * @throws ConflictException if the time range conflicts with existing bookings or blocks
+     */
+    public Block execute(OffsetDateTime startAt, OffsetDateTime endAt, String reason) {
+        log.info("Creating block from {} to {} with reason: {}", startAt, endAt, reason);
+
+        // Validate alignment (30-min intervals)
+        validateAlignment(startAt, "startAt");
+        validateAlignment(endAt, "endAt");
+
+        // Validate time range
+        if (!startAt.isBefore(endAt)) {
+            throw new ValidationException("La hora de inicio debe ser anterior a la hora de fin");
+        }
+
+        // Check for collisions with active blocks
+        if (blockRepository.existsActiveBlockInRange(startAt, endAt)) {
+            throw new ConflictException("Ya existe un bloqueo activo en ese rango de tiempo");
+        }
+
+        // Check for collisions with active bookings
+        // Bookings that "occupy" are PENDING or CONFIRMED
+        if (hasBookingCollision(startAt, endAt)) {
+            throw new ConflictException("Existe un turno activo en ese rango de tiempo");
+        }
+
+        // Generate block number
+        String blockNumber = generateBlockNumber();
+
+        // Create block using factory method
+        Block block = Block.create(blockNumber, reason, startAt, endAt);
+
+        // Persist
+        Block saved = blockRepository.save(block);
+        log.info("Block created successfully: {}", saved.getBlockNumber());
+
+        return saved;
+    }
+
+    private void validateAlignment(OffsetDateTime time, String fieldName) {
+        int minute = time.getMinute();
+        if (minute != 0 && minute != 30) {
+            throw new ValidationException(
+                    fieldName + " debe estar alineado a intervalos de 30 minutos (:00 o :30)"
+            );
+        }
+    }
+
+    private boolean hasBookingCollision(OffsetDateTime startAt, OffsetDateTime endAt) {
+        // Query bookings in range (only those that occupy time: PENDING, CONFIRMED)
+        return bookingRepository.findByDateRange(startAt, endAt, false).stream()
+                .anyMatch(booking -> {
+                    OffsetDateTime bookingStart = booking.getStartAt();
+                    OffsetDateTime bookingEnd = booking.getEndAt();
+                    // Collision: A.start < B.end AND B.start < A.end
+                    return bookingStart.isBefore(endAt) && startAt.isBefore(bookingEnd);
+                });
+    }
+
+    private String generateBlockNumber() {
+        String uuid = UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase();
+        return "BLOCK-" + uuid;
+    }
+}
+
+
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/application/usecase/CreateBookingUseCase.java ==========
 package com.flavia.dermobeauty.booking.application.usecase;
 
 import com.flavia.dermobeauty.booking.domain.*;
 import com.flavia.dermobeauty.shared.exception.ValidationException;
-import lombok.RequiredArgsConstructor; // <--- IMPORTANTE
-import lombok.extern.slf4j.Slf4j;     // <--- IMPORTANTE
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.util.UUID;
 
 @SuppressWarnings("ClassCanBeRecord")
-@Slf4j // <--- Soluciona el error "Cannot resolve symbol 'log'"
-@RequiredArgsConstructor // <--- Soluciona el error del "bookingRepository" no inicializado
+@Slf4j
+@RequiredArgsConstructor
 public class CreateBookingUseCase {
+
+    private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
 
     private final BookingRepository bookingRepository;
 
     public Booking execute(
             Long serviceId,
+            String serviceName,
             String customerName,
             String customerEmail,
             String customerWhatsapp,
@@ -3242,6 +3539,15 @@ public class CreateBookingUseCase {
             BigDecimal amount) {
 
         log.info("Creating booking for service {} on {} at {}", serviceId, bookingDate, bookingTime);
+
+        // Validar alineación a slots de 30 minutos
+        if (bookingTime.getMinute() != 0 && bookingTime.getMinute() != 30) {
+            throw new ValidationException("El horario debe ser en intervalos de 30 minutos (:00 o :30)");
+        }
+
+        if (durationMinutes <= 0 || durationMinutes % 30 != 0) {
+            throw new ValidationException("La duración debe ser múltiplo de 30 minutos");
+        }
 
         // Calcular hora de fin
         LocalTime bookingEndTime = bookingTime.plusMinutes(durationMinutes);
@@ -3263,12 +3569,19 @@ public class CreateBookingUseCase {
 
         TimeSlot timeSlot = new TimeSlot(bookingDate, bookingTime);
 
+        // Crear startAt con timezone
+        OffsetDateTime startAt = LocalDateTime.of(bookingDate, bookingTime)
+                .atZone(ARGENTINA_ZONE)
+                .toOffsetDateTime();
+
         // Crear booking aggregate
         Booking booking = Booking.builder()
                 .bookingNumber(generateBookingNumber())
                 .serviceId(serviceId)
+                .serviceName(serviceName)
                 .customerInfo(customerInfo)
                 .timeSlot(timeSlot)
+                .startAt(startAt)
                 .durationMinutes(durationMinutes)
                 .status(BookingStatus.PENDING)
                 .paymentStatus(PaymentStatus.PENDING)
@@ -3284,29 +3597,48 @@ public class CreateBookingUseCase {
         return saved;
     }
 
+    /**
+     * Generates a booking number using ULID-like format for uniqueness.
+     * Format: BOOK-{first 8 chars of UUID}
+     */
     private String generateBookingNumber() {
-        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-        return "BOOK-" + timestamp;
+        String uuid = UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase();
+        return "BOOK-" + uuid;
     }
 }
 
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/application/usecase/GetAvailableSlotsUseCase.java ==========
 package com.flavia.dermobeauty.booking.application.usecase;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.flavia.dermobeauty.booking.domain.Booking;
 import com.flavia.dermobeauty.booking.domain.BookingRepository;
+import com.flavia.dermobeauty.booking.domain.BookingStatus;
 import com.flavia.dermobeauty.catalog.entity.ServiceEntity;
 import com.flavia.dermobeauty.catalog.repository.ServiceRepository;
+import com.flavia.dermobeauty.config.domain.ConfigEntry;
+import com.flavia.dermobeauty.config.repository.ConfigRepository;
 import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component; // Usamos Component o Service para inyección
+import org.springframework.stereotype.Component;
 
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.format.TextStyle;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 
+/**
+ * Use Case: Get available time slots for a service on a specific date.
+ *
+ * Business hours are now database-driven via the "schedule.weekly" config entry.
+ * Returns empty list if the requested day is marked as closed.
+ */
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -3314,41 +3646,110 @@ public class GetAvailableSlotsUseCase {
 
     private final BookingRepository bookingRepository;
     private final ServiceRepository serviceRepository;
+    private final ConfigRepository configRepository;
+    private final ObjectMapper objectMapper;
 
-    // TODO: Mover esto a ConfigService en el futuro
-    private static final LocalTime OPEN_TIME = LocalTime.of(9, 0);
-    private static final LocalTime CLOSE_TIME = LocalTime.of(19, 0);
     private static final int SLOT_INTERVAL_MINUTES = 30;
+    private static final String SCHEDULE_CONFIG_KEY = "schedule.weekly";
+
+    // Fallback values if config is missing or invalid
+    private static final LocalTime FALLBACK_OPEN_TIME = LocalTime.of(9, 0);
+    private static final LocalTime FALLBACK_CLOSE_TIME = LocalTime.of(19, 0);
 
     public List<LocalTime> execute(Long serviceId, LocalDate date) {
         log.debug("Calculating availability for service {} on {}", serviceId, date);
 
-        // 1. Obtener duración del servicio
+        // 1. Get service duration
         ServiceEntity service = serviceRepository.findById(serviceId)
                 .orElseThrow(() -> new ResourceNotFoundException("Service", serviceId));
         int durationMinutes = service.getDurationMinutes();
 
-        // 2. Obtener reservas existentes del día (Confirmadas o Pendientes)
+        // 2. Get business hours for the requested day
+        BusinessHours businessHours = getBusinessHoursForDate(date);
+
+        // 3. If the day is closed, return empty list
+        if (!businessHours.isEnabled()) {
+            log.info("Day {} is closed. No slots available.", date.getDayOfWeek());
+            return Collections.emptyList();
+        }
+
+        // 4. Get existing bookings for the day
         List<Booking> existingBookings = bookingRepository.findByDate(date);
 
-        // 3. Calcular slots
+        // 5. Check if the day is blocked (blocked bookings prevent all other bookings)
+        boolean isDayBlocked = existingBookings.stream()
+                .anyMatch(b -> b.getStatus() == BookingStatus.BLOCKED);
+
+        if (isDayBlocked) {
+            log.info("Day {} is blocked. No slots available.", date);
+            return Collections.emptyList();
+        }
+
+        // 6. Calculate available slots
         List<LocalTime> availableSlots = new ArrayList<>();
-        LocalTime currentSlot = OPEN_TIME;
+        LocalTime currentSlot = businessHours.getOpenTime();
+        LocalTime closeTime = businessHours.getCloseTime();
 
-        // Iteramos mientras el servicio termine antes o a la hora de cierre
-        while (canServiceFit(currentSlot, durationMinutes, CLOSE_TIME)) {
-
+        // Iterate while the service can fit before closing time
+        while (canServiceFit(currentSlot, durationMinutes, closeTime)) {
             LocalTime endSlot = currentSlot.plusMinutes(durationMinutes);
 
             if (isSlotFree(currentSlot, endSlot, existingBookings)) {
                 availableSlots.add(currentSlot);
             }
 
-            // Avanzamos 30 minutos
+            // Advance by slot interval
             currentSlot = currentSlot.plusMinutes(SLOT_INTERVAL_MINUTES);
         }
 
+        log.debug("Found {} available slots for {} on {}", availableSlots.size(), serviceId, date);
         return availableSlots;
+    }
+
+    /**
+     * Fetches business hours from database config for the requested date.
+     * Returns fallback hours if config is missing or invalid.
+     */
+    private BusinessHours getBusinessHoursForDate(LocalDate date) {
+        try {
+            // Get day of week (e.g., "monday", "tuesday")
+            String dayKey = date.getDayOfWeek()
+                    .getDisplayName(TextStyle.FULL, Locale.ENGLISH)
+                    .toLowerCase();
+
+            // Fetch schedule config from database
+            ConfigEntry scheduleConfig = configRepository.findByKey(SCHEDULE_CONFIG_KEY)
+                    .orElseThrow(() -> new RuntimeException("Schedule config not found"));
+
+            // Parse JSON
+            JsonNode scheduleJson = objectMapper.readTree(scheduleConfig.getValue());
+            JsonNode dayConfig = scheduleJson.get(dayKey);
+
+            if (dayConfig == null) {
+                log.warn("No config found for day '{}', using fallback", dayKey);
+                return new BusinessHours(true, FALLBACK_OPEN_TIME, FALLBACK_CLOSE_TIME);
+            }
+
+            // Extract day-specific configuration
+            boolean enabled = dayConfig.get("enabled").asBoolean();
+
+            if (!enabled) {
+                return new BusinessHours(false, null, null);
+            }
+
+            String startTimeStr = dayConfig.get("startTime").asText();
+            String endTimeStr = dayConfig.get("endTime").asText();
+
+            LocalTime openTime = LocalTime.parse(startTimeStr);
+            LocalTime closeTime = LocalTime.parse(endTimeStr);
+
+            log.debug("Business hours for {}: {} - {}", dayKey, openTime, closeTime);
+            return new BusinessHours(true, openTime, closeTime);
+
+        } catch (Exception e) {
+            log.error("Error parsing schedule config, using fallback hours", e);
+            return new BusinessHours(true, FALLBACK_OPEN_TIME, FALLBACK_CLOSE_TIME);
+        }
     }
 
     private boolean canServiceFit(LocalTime start, int duration, LocalTime closeTime) {
@@ -3362,13 +3763,39 @@ public class GetAvailableSlotsUseCase {
             LocalTime bStart = b.getTimeSlot().getTime();
             LocalTime bEnd = bStart.plusMinutes(b.getDurationMinutes());
 
-            // Lógica de solapamiento:
-            // (StartA < EndB) y (EndA > StartB)
+            // Overlap logic: (StartA < EndB) AND (EndA > StartB)
             if (newStart.isBefore(bEnd) && newEnd.isAfter(bStart)) {
-                return false; // Hay colisión
+                return false; // Collision detected
             }
         }
         return true;
+    }
+
+    /**
+     * Inner class to hold business hours for a specific day.
+     */
+    private static class BusinessHours {
+        private final boolean enabled;
+        private final LocalTime openTime;
+        private final LocalTime closeTime;
+
+        public BusinessHours(boolean enabled, LocalTime openTime, LocalTime closeTime) {
+            this.enabled = enabled;
+            this.openTime = openTime;
+            this.closeTime = closeTime;
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public LocalTime getOpenTime() {
+            return openTime;
+        }
+
+        public LocalTime getCloseTime() {
+            return closeTime;
+        }
     }
 }
 
@@ -3396,6 +3823,83 @@ public class GetBookingByNumberUseCase {
 
         return bookingRepository.findByBookingNumber(bookingNumber)
                 .orElseThrow(() -> new ResourceNotFoundException("Booking with number '" + bookingNumber + "' not found"));
+    }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/application/usecase/GetCalendarEventsUseCase.java ==========
+package com.flavia.dermobeauty.booking.application.usecase;
+
+import com.flavia.dermobeauty.booking.domain.Block;
+import com.flavia.dermobeauty.booking.domain.BlockRepository;
+import com.flavia.dermobeauty.booking.domain.Booking;
+import com.flavia.dermobeauty.booking.domain.BookingRepository;
+import com.flavia.dermobeauty.booking.web.dto.CalendarEventResponse;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+/**
+ * Use case for fetching calendar events (bookings + blocks merged).
+ * Returns a unified list of CalendarEventResponse sorted by start time.
+ */
+@SuppressWarnings("ClassCanBeRecord")
+@Slf4j
+@RequiredArgsConstructor
+public class GetCalendarEventsUseCase {
+
+    private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
+
+    private final BookingRepository bookingRepository;
+    private final BlockRepository blockRepository;
+
+    /**
+     * Fetches calendar events for a date range.
+     *
+     * @param fromDate start date (interpreted in Argentina timezone)
+     * @param toDate end date (interpreted in Argentina timezone, inclusive)
+     * @param includeCancelled if true, includes cancelled events
+     * @return list of calendar events sorted by start time
+     */
+    public List<CalendarEventResponse> execute(LocalDate fromDate, LocalDate toDate, boolean includeCancelled) {
+        log.info("Fetching calendar events from {} to {} (includeCancelled={})",
+                fromDate, toDate, includeCancelled);
+
+        // Convert dates to OffsetDateTime in Argentina timezone
+        OffsetDateTime from = fromDate.atStartOfDay(ARGENTINA_ZONE).toOffsetDateTime();
+        OffsetDateTime to = toDate.atTime(LocalTime.MAX).atZone(ARGENTINA_ZONE).toOffsetDateTime();
+
+        // Fetch bookings
+        List<Booking> bookings = bookingRepository.findByDateRange(from, to, includeCancelled);
+        log.debug("Found {} bookings in range", bookings.size());
+
+        // Fetch blocks
+        List<Block> blocks = blockRepository.findByDateRange(from, to, includeCancelled);
+        log.debug("Found {} blocks in range", blocks.size());
+
+        // Convert and merge
+        List<CalendarEventResponse> events = new ArrayList<>();
+
+        for (Booking booking : bookings) {
+            events.add(CalendarEventResponse.fromBooking(booking));
+        }
+
+        for (Block block : blocks) {
+            events.add(CalendarEventResponse.fromBlock(block));
+        }
+
+        // Sort by start time
+        events.sort(Comparator.comparing(CalendarEventResponse::getStartAt));
+
+        log.info("Returning {} total calendar events", events.size());
+        return events;
     }
 }
 
@@ -3433,13 +3937,150 @@ public class ListBookingsUseCase {
 }
 
 
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/application/usecase/RescheduleBookingUseCase.java ==========
+package com.flavia.dermobeauty.booking.application.usecase;
+
+import com.flavia.dermobeauty.booking.domain.BlockRepository;
+import com.flavia.dermobeauty.booking.domain.Booking;
+import com.flavia.dermobeauty.booking.domain.BookingRepository;
+import com.flavia.dermobeauty.shared.exception.ConflictException;
+import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
+import com.flavia.dermobeauty.shared.exception.ValidationException;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import java.time.OffsetDateTime;
+
+/**
+ * Use case for rescheduling a booking to a new time.
+ * Validates alignment rules and checks for collisions.
+ */
+@SuppressWarnings("ClassCanBeRecord")
+@Slf4j
+@RequiredArgsConstructor
+public class RescheduleBookingUseCase {
+
+    private final BookingRepository bookingRepository;
+    private final BlockRepository blockRepository;
+
+    /**
+     * Reschedules a booking to a new start time.
+     *
+     * @param bookingId the ID of the booking to reschedule
+     * @param newStartAt the new start time (must be aligned to 30-min intervals)
+     * @return the rescheduled booking
+     * @throws ResourceNotFoundException if booking not found
+     * @throws ValidationException if alignment rules are violated
+     * @throws ConflictException if the new time conflicts with existing bookings or blocks
+     */
+    public Booking execute(Long bookingId, OffsetDateTime newStartAt) {
+        log.info("Rescheduling booking {} to {}", bookingId, newStartAt);
+
+        // Find booking
+        Booking booking = bookingRepository.findById(bookingId)
+                .orElseThrow(() -> new ResourceNotFoundException("Booking", bookingId));
+
+        // Validate alignment
+        int minute = newStartAt.getMinute();
+        if (minute != 0 && minute != 30) {
+            throw new ValidationException("El horario debe estar alineado a intervalos de 30 minutos (:00 o :30)");
+        }
+
+        // Calculate new end time
+        OffsetDateTime newEndAt = newStartAt.plusMinutes(booking.getDurationMinutes());
+
+        // Check for collisions with other bookings (excluding this one)
+        if (hasBookingCollision(bookingId, newStartAt, newEndAt)) {
+            throw new ConflictException("El nuevo horario colisiona con otro turno existente");
+        }
+
+        // Check for collisions with blocks
+        if (blockRepository.existsActiveBlockInRange(newStartAt, newEndAt)) {
+            throw new ConflictException("El nuevo horario colisiona con un bloqueo existente");
+        }
+
+        // Reschedule
+        booking.reschedule(newStartAt);
+
+        // Persist
+        Booking saved = bookingRepository.save(booking);
+        log.info("Booking {} rescheduled to {}", saved.getBookingNumber(), newStartAt);
+
+        return saved;
+    }
+
+    private boolean hasBookingCollision(Long excludeBookingId, OffsetDateTime startAt, OffsetDateTime endAt) {
+        // Query bookings in range (only those that occupy time: PENDING, CONFIRMED)
+        return bookingRepository.findByDateRange(startAt, endAt, false).stream()
+                .filter(b -> !b.getId().equals(excludeBookingId)) // Exclude current booking
+                .anyMatch(booking -> {
+                    OffsetDateTime bookingStart = booking.getStartAt();
+                    OffsetDateTime bookingEnd = booking.getEndAt();
+                    // Collision: A.start < B.end AND B.start < A.end
+                    return bookingStart.isBefore(endAt) && startAt.isBefore(bookingEnd);
+                });
+    }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/application/usecase/UpdateBookingCustomerUseCase.java ==========
+package com.flavia.dermobeauty.booking.application.usecase;
+
+import com.flavia.dermobeauty.booking.domain.Booking;
+import com.flavia.dermobeauty.booking.domain.BookingRepository;
+import com.flavia.dermobeauty.booking.domain.CustomerInfo;
+import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * Use case for updating customer information on a booking.
+ */
+@SuppressWarnings("ClassCanBeRecord")
+@Slf4j
+@RequiredArgsConstructor
+public class UpdateBookingCustomerUseCase {
+
+    private final BookingRepository bookingRepository;
+
+    /**
+     * Updates customer information on a booking.
+     *
+     * @param bookingId the ID of the booking
+     * @param name customer name
+     * @param email customer email
+     * @param whatsapp customer WhatsApp number
+     * @param comments optional comments
+     * @return the updated booking
+     * @throws ResourceNotFoundException if booking not found
+     */
+    public Booking execute(Long bookingId, String name, String email, String whatsapp, String comments) {
+        log.info("Updating customer info for booking {}", bookingId);
+
+        Booking booking = bookingRepository.findById(bookingId)
+                .orElseThrow(() -> new ResourceNotFoundException("Booking", bookingId));
+
+        CustomerInfo newCustomerInfo = new CustomerInfo(name, email, whatsapp, comments);
+        booking.updateCustomer(newCustomerInfo);
+
+        Booking saved = bookingRepository.save(booking);
+        log.info("Customer info updated for booking {}", saved.getBookingNumber());
+
+        return saved;
+    }
+}
+
+
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/config/BookingConfig.java ==========
 package com.flavia.dermobeauty.booking.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.flavia.dermobeauty.booking.application.port.NotificationService;
 import com.flavia.dermobeauty.booking.application.usecase.*;
+import com.flavia.dermobeauty.booking.domain.BlockRepository;
 import com.flavia.dermobeauty.booking.domain.BookingRepository;
 import com.flavia.dermobeauty.catalog.repository.ServiceRepository;
+import com.flavia.dermobeauty.config.repository.ConfigRepository;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -3480,10 +4121,344 @@ public class BookingConfig {
     @Bean
     public GetAvailableSlotsUseCase getAvailableSlotsUseCase(
             BookingRepository bookingRepository,
-            ServiceRepository serviceRepository
+            ServiceRepository serviceRepository,
+            ConfigRepository configRepository,
+            ObjectMapper objectMapper
     ) {
-        return new GetAvailableSlotsUseCase(bookingRepository, serviceRepository);
+        return new GetAvailableSlotsUseCase(
+                bookingRepository,
+                serviceRepository,
+                configRepository,
+                objectMapper
+        );
     }
+
+    @Bean
+    public GetCalendarEventsUseCase getCalendarEventsUseCase(
+            BookingRepository bookingRepository,
+            BlockRepository blockRepository
+    ) {
+        return new GetCalendarEventsUseCase(bookingRepository, blockRepository);
+    }
+
+    @Bean
+    public CreateBlockUseCase createBlockUseCase(
+            BlockRepository blockRepository,
+            BookingRepository bookingRepository
+    ) {
+        return new CreateBlockUseCase(blockRepository, bookingRepository);
+    }
+
+    @Bean
+    public CancelBlockUseCase cancelBlockUseCase(BlockRepository blockRepository) {
+        return new CancelBlockUseCase(blockRepository);
+    }
+
+    @Bean
+    public RescheduleBookingUseCase rescheduleBookingUseCase(
+            BookingRepository bookingRepository,
+            BlockRepository blockRepository
+    ) {
+        return new RescheduleBookingUseCase(bookingRepository, blockRepository);
+    }
+
+    @Bean
+    public UpdateBookingCustomerUseCase updateBookingCustomerUseCase(BookingRepository bookingRepository) {
+        return new UpdateBookingCustomerUseCase(bookingRepository);
+    }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/domain/Block.java ==========
+package com.flavia.dermobeauty.booking.domain;
+
+import com.flavia.dermobeauty.shared.exception.DomainException;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+
+/**
+ * Block Aggregate Root.
+ * Represents a schedule block (holiday, personal day, etc.).
+ * Blocks occupy time slots and prevent bookings during that period.
+ */
+@Getter
+@AllArgsConstructor
+@Builder
+public class Block {
+
+    private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
+
+    private Long id;
+    private String blockNumber;
+    private String reason;
+    private OffsetDateTime startAt;
+    private OffsetDateTime endAt;
+    private BlockStatus status;
+    private OffsetDateTime createdAt;
+    private OffsetDateTime updatedAt;
+    private OffsetDateTime cancelledAt;
+
+    /**
+     * Factory method to create a new block.
+     * Validates business rules at creation time.
+     */
+    public static Block create(String blockNumber, String reason, OffsetDateTime startAt, OffsetDateTime endAt) {
+        validateTimeRange(startAt, endAt);
+        validateAlignment(startAt, "startAt");
+        validateAlignment(endAt, "endAt");
+
+        if (reason == null || reason.isBlank()) {
+            throw new IllegalArgumentException("Block reason cannot be empty");
+        }
+
+        OffsetDateTime now = OffsetDateTime.now(ARGENTINA_ZONE);
+
+        return Block.builder()
+                .blockNumber(blockNumber)
+                .reason(reason.trim())
+                .startAt(startAt)
+                .endAt(endAt)
+                .status(BlockStatus.ACTIVE)
+                .createdAt(now)
+                .updatedAt(now)
+                .build();
+    }
+
+    /**
+     * Cancels this block.
+     * Cancelled blocks no longer occupy time slots.
+     */
+    public void cancel() {
+        if (this.status == BlockStatus.CANCELLED) {
+            throw new DomainException("Block " + blockNumber + " is already cancelled");
+        }
+
+        OffsetDateTime now = OffsetDateTime.now(ARGENTINA_ZONE);
+        this.status = BlockStatus.CANCELLED;
+        this.cancelledAt = now;
+        this.updatedAt = now;
+    }
+
+    /**
+     * Checks if this block occupies time slots (used in collision detection).
+     */
+    public boolean occupiesTime() {
+        return status == BlockStatus.ACTIVE;
+    }
+
+    /**
+     * Gets the duration of this block in minutes.
+     */
+    public long getDurationMinutes() {
+        return java.time.Duration.between(startAt, endAt).toMinutes();
+    }
+
+    private static void validateTimeRange(OffsetDateTime startAt, OffsetDateTime endAt) {
+        if (startAt == null || endAt == null) {
+            throw new IllegalArgumentException("Start and end times cannot be null");
+        }
+        if (!endAt.isAfter(startAt)) {
+            throw new DomainException("Block end time must be after start time");
+        }
+    }
+
+    private static void validateAlignment(OffsetDateTime time, String fieldName) {
+        int minute = time.getMinute();
+        if (minute != 0 && minute != 30) {
+            throw new DomainException(fieldName + " must be aligned to 30-minute intervals (:00 or :30)");
+        }
+    }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/domain/BlockRepository.java ==========
+package com.flavia.dermobeauty.booking.domain;
+
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Repository port for Block aggregate.
+ * Defines the contract for block persistence operations.
+ */
+public interface BlockRepository {
+
+    /**
+     * Saves a block (create or update).
+     */
+    Block save(Block block);
+
+    /**
+     * Finds a block by its ID.
+     */
+    Optional<Block> findById(Long id);
+
+    /**
+     * Finds a block by its block number.
+     */
+    Optional<Block> findByBlockNumber(String blockNumber);
+
+    /**
+     * Finds all active blocks within a date range.
+     * Used for calendar display.
+     */
+    List<Block> findByDateRange(OffsetDateTime from, OffsetDateTime to, boolean includeCancelled);
+
+    /**
+     * Finds all active blocks that overlap with a given time range.
+     * Used for collision detection.
+     */
+    List<Block> findActiveBlocksInRange(OffsetDateTime startAt, OffsetDateTime endAt);
+
+    /**
+     * Checks if there's any active block that overlaps with the given time range.
+     * Optimized for collision detection (returns early if any collision found).
+     */
+    boolean existsActiveBlockInRange(OffsetDateTime startAt, OffsetDateTime endAt);
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/domain/BlockStatus.java ==========
+package com.flavia.dermobeauty.booking.domain;
+
+/**
+ * Domain enum representing the status of a schedule block.
+ */
+public enum BlockStatus {
+    ACTIVE,     // Block is active and occupies the time slot
+    CANCELLED   // Block was cancelled and no longer occupies time
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/domain/BookingHistory.java ==========
+package com.flavia.dermobeauty.booking.domain;
+
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.util.Map;
+
+/**
+ * BookingHistory Entity.
+ * Represents an audit trail entry for a booking change.
+ * This is an append-only entity: records are never modified or deleted.
+ */
+@Getter
+@AllArgsConstructor
+@Builder
+public class BookingHistory {
+
+    private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
+
+    private Long id;
+    private Long bookingId;
+    private HistoryEventType eventType;
+    private HistoryActor actor;
+    private Map<String, Object> payload;  // JSON payload as Map
+    private OffsetDateTime createdAt;
+
+    /**
+     * Factory method to create a new history entry.
+     */
+    public static BookingHistory create(Long bookingId, HistoryEventType eventType, HistoryActor actor, Map<String, Object> payload) {
+        if (bookingId == null) {
+            throw new IllegalArgumentException("Booking ID cannot be null");
+        }
+        if (eventType == null) {
+            throw new IllegalArgumentException("Event type cannot be null");
+        }
+        if (actor == null) {
+            throw new IllegalArgumentException("Actor cannot be null");
+        }
+
+        return BookingHistory.builder()
+                .bookingId(bookingId)
+                .eventType(eventType)
+                .actor(actor)
+                .payload(payload)
+                .createdAt(OffsetDateTime.now(ARGENTINA_ZONE))
+                .build();
+    }
+
+    /**
+     * Convenience factory for CREATED event.
+     */
+    public static BookingHistory created(Long bookingId, HistoryActor actor) {
+        return create(bookingId, HistoryEventType.CREATED, actor, null);
+    }
+
+    /**
+     * Convenience factory for STATUS_CHANGED event.
+     */
+    public static BookingHistory statusChanged(Long bookingId, HistoryActor actor, BookingStatus oldStatus, BookingStatus newStatus) {
+        return create(bookingId, HistoryEventType.STATUS_CHANGED, actor, Map.of(
+                "old_status", oldStatus.name(),
+                "new_status", newStatus.name()
+        ));
+    }
+
+    /**
+     * Convenience factory for RESCHEDULED event.
+     */
+    public static BookingHistory rescheduled(Long bookingId, HistoryActor actor, OffsetDateTime oldStartAt, OffsetDateTime newStartAt) {
+        return create(bookingId, HistoryEventType.RESCHEDULED, actor, Map.of(
+                "old_start_at", oldStartAt.toString(),
+                "new_start_at", newStartAt.toString()
+        ));
+    }
+
+    /**
+     * Convenience factory for CUSTOMER_UPDATED event.
+     */
+    public static BookingHistory customerUpdated(Long bookingId, HistoryActor actor, Map<String, Object> changes) {
+        return create(bookingId, HistoryEventType.CUSTOMER_UPDATED, actor, changes);
+    }
+
+    /**
+     * Convenience factory for PAYMENT_UPDATED event.
+     */
+    public static BookingHistory paymentUpdated(Long bookingId, HistoryActor actor, PaymentStatus oldStatus, PaymentStatus newStatus) {
+        return create(bookingId, HistoryEventType.PAYMENT_UPDATED, actor, Map.of(
+                "old_payment_status", oldStatus.name(),
+                "new_payment_status", newStatus.name()
+        ));
+    }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/domain/BookingHistoryRepository.java ==========
+package com.flavia.dermobeauty.booking.domain;
+
+import java.util.List;
+
+/**
+ * Repository port for BookingHistory.
+ * Append-only: only save and find operations, no delete.
+ */
+public interface BookingHistoryRepository {
+
+    /**
+     * Saves a history entry (always insert, never update).
+     */
+    BookingHistory save(BookingHistory history);
+
+    /**
+     * Finds all history entries for a booking, ordered by creation time (newest first).
+     */
+    List<BookingHistory> findByBookingId(Long bookingId);
+
+    /**
+     * Finds all history entries for a booking, ordered by creation time (oldest first).
+     */
+    List<BookingHistory> findByBookingIdOrderByCreatedAtAsc(Long bookingId);
 }
 
 
@@ -3497,6 +4472,8 @@ import lombok.Getter;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 
 /**
  * Booking Aggregate Root.
@@ -3507,11 +4484,15 @@ import java.time.LocalDateTime;
 @Builder
 public class Booking {
 
+    private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
+
     private Long id;
     private String bookingNumber;
     private Long serviceId;
+    private String serviceName;  // Snapshot inmutable del nombre del servicio
     private CustomerInfo customerInfo;
-    private TimeSlot timeSlot;
+    private TimeSlot timeSlot;  // Legacy - kept for compatibility
+    private OffsetDateTime startAt;  // New datetime with timezone
     private Integer durationMinutes;
     private BookingStatus status;
     private PaymentStatus paymentStatus;
@@ -3522,6 +4503,25 @@ public class Booking {
     private LocalDateTime updatedAt;
     private LocalDateTime confirmedAt;
     private LocalDateTime cancelledAt;
+
+    /**
+     * Computed end time based on startAt + durationMinutes.
+     * This is NOT persisted in DB to avoid inconsistencies.
+     */
+    public OffsetDateTime getEndAt() {
+        if (startAt == null || durationMinutes == null) {
+            return null;
+        }
+        return startAt.plusMinutes(durationMinutes);
+    }
+
+    /**
+     * Checks if this booking occupies time slots (used in collision detection).
+     * Only PENDING and CONFIRMED bookings occupy time.
+     */
+    public boolean occupiesTime() {
+        return status == BookingStatus.PENDING || status == BookingStatus.CONFIRMED;
+    }
 
     /**
      * Confirms payment for this booking.
@@ -3595,6 +4595,76 @@ public class Booking {
     public boolean isCancellable() {
         return status != BookingStatus.CANCELLED && status != BookingStatus.COMPLETED;
     }
+
+    /**
+     * Reschedules this booking to a new date and time.
+     * Business rule: cannot reschedule cancelled or completed bookings.
+     *
+     * @param newTimeSlot the new time slot (legacy)
+     */
+    public void reschedule(TimeSlot newTimeSlot) {
+        if (this.status == BookingStatus.CANCELLED) {
+            throw new DomainException("Cannot reschedule cancelled booking " + bookingNumber);
+        }
+
+        if (this.status == BookingStatus.COMPLETED) {
+            throw new DomainException("Cannot reschedule completed booking " + bookingNumber);
+        }
+
+        if (newTimeSlot == null) {
+            throw new IllegalArgumentException("New time slot cannot be null");
+        }
+
+        this.timeSlot = newTimeSlot;
+        this.updatedAt = LocalDateTime.now();
+    }
+
+    /**
+     * Reschedules this booking to a new start time.
+     * Business rule: cannot reschedule cancelled or completed bookings.
+     * Start time must be aligned to 30-minute intervals.
+     *
+     * @param newStartAt the new start time
+     */
+    public void reschedule(OffsetDateTime newStartAt) {
+        if (this.status == BookingStatus.CANCELLED) {
+            throw new DomainException("Cannot reschedule cancelled booking " + bookingNumber);
+        }
+
+        if (this.status == BookingStatus.COMPLETED) {
+            throw new DomainException("Cannot reschedule completed booking " + bookingNumber);
+        }
+
+        if (newStartAt == null) {
+            throw new IllegalArgumentException("New start time cannot be null");
+        }
+
+        int minute = newStartAt.getMinute();
+        if (minute != 0 && minute != 30) {
+            throw new DomainException("Start time must be aligned to 30-minute intervals (:00 or :30)");
+        }
+
+        this.startAt = newStartAt;
+        // Also update legacy timeSlot for compatibility
+        if (this.timeSlot != null) {
+            this.timeSlot = new TimeSlot(
+                    newStartAt.toLocalDate(),
+                    newStartAt.toLocalTime()
+            );
+        }
+        this.updatedAt = LocalDateTime.now();
+    }
+
+    /**
+     * Updates customer information.
+     */
+    public void updateCustomer(CustomerInfo newCustomerInfo) {
+        if (newCustomerInfo == null) {
+            throw new IllegalArgumentException("Customer info cannot be null");
+        }
+        this.customerInfo = newCustomerInfo;
+        this.updatedAt = LocalDateTime.now();
+    }
 }
 
 
@@ -3603,6 +4673,7 @@ package com.flavia.dermobeauty.booking.domain;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -3651,6 +4722,15 @@ public interface BookingRepository {
 
     List<Booking> findByDate(LocalDate date);
 
+    /**
+     * Find bookings within a date range for calendar display.
+     * @param from start of range (inclusive)
+     * @param to end of range (inclusive)
+     * @param includeCancelled if true, includes cancelled bookings
+     * @return list of bookings in range
+     */
+    List<Booking> findByDateRange(OffsetDateTime from, OffsetDateTime to, boolean includeCancelled);
+
 }
 
 
@@ -3664,7 +4744,8 @@ public enum BookingStatus {
     PENDING,    // Initial state, payment not yet completed
     CONFIRMED,  // Payment completed, booking confirmed
     CANCELLED,  // Booking cancelled (by admin or customer)
-    COMPLETED   // Service was provided
+    COMPLETED,  // Service was provided
+    BLOCKED     // Time slot blocked by admin (holiday, personal day, etc.)
 }
 
 
@@ -3703,6 +4784,35 @@ public class CustomerInfo {
 }
 
 
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/domain/HistoryActor.java ==========
+package com.flavia.dermobeauty.booking.domain;
+
+/**
+ * Domain enum for who made a change in booking history.
+ */
+public enum HistoryActor {
+    ADMIN,    // Change made by admin through admin panel
+    SYSTEM,   // Change made by system (e.g., payment webhook)
+    CUSTOMER  // Change made by customer through public interface
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/domain/HistoryEventType.java ==========
+package com.flavia.dermobeauty.booking.domain;
+
+/**
+ * Domain enum for booking history event types.
+ * Used to categorize changes in the audit trail.
+ */
+public enum HistoryEventType {
+    CREATED,           // Booking was created
+    STATUS_CHANGED,    // Status changed (PENDING -> CONFIRMED, etc.)
+    RESCHEDULED,       // Booking was rescheduled to a new time
+    CUSTOMER_UPDATED,  // Customer info was updated (name, whatsapp, comments)
+    PAYMENT_UPDATED    // Payment status was updated
+}
+
+
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/domain/PaymentStatus.java ==========
 package com.flavia.dermobeauty.booking.domain;
 
@@ -3710,10 +4820,11 @@ package com.flavia.dermobeauty.booking.domain;
  * Domain enum representing the payment status of a booking.
  */
 public enum PaymentStatus {
-    PENDING,   // Payment not yet initiated or in progress
-    PAID,      // Payment successfully completed
-    FAILED,    // Payment failed
-    REFUNDED   // Payment was refunded
+    PENDING,       // Payment not yet initiated or in progress
+    PAID,          // Payment successfully completed
+    FAILED,        // Payment failed
+    REFUNDED,      // Payment was refunded
+    NOT_REQUIRED   // No payment required (e.g., blocked time slots)
 }
 
 
@@ -3760,6 +4871,114 @@ public class TimeSlot {
 }
 
 
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/infrastructure/mapper/BlockMapper.java ==========
+package com.flavia.dermobeauty.booking.infrastructure.mapper;
+
+import com.flavia.dermobeauty.booking.domain.Block;
+import com.flavia.dermobeauty.booking.infrastructure.persistence.BlockEntity;
+import org.springframework.stereotype.Component;
+
+/**
+ * Mapper between Block domain entity and BlockEntity JPA entity.
+ */
+@Component
+public class BlockMapper {
+
+    /**
+     * Converts a domain Block to a JPA BlockEntity.
+     */
+    public BlockEntity toEntity(Block block) {
+        if (block == null) {
+            return null;
+        }
+
+        return BlockEntity.builder()
+                .id(block.getId())
+                .blockNumber(block.getBlockNumber())
+                .reason(block.getReason())
+                .startAt(block.getStartAt())
+                .endAt(block.getEndAt())
+                .status(block.getStatus())
+                .createdAt(block.getCreatedAt())
+                .updatedAt(block.getUpdatedAt())
+                .cancelledAt(block.getCancelledAt())
+                .build();
+    }
+
+    /**
+     * Converts a JPA BlockEntity to a domain Block.
+     */
+    public Block toDomain(BlockEntity entity) {
+        if (entity == null) {
+            return null;
+        }
+
+        return Block.builder()
+                .id(entity.getId())
+                .blockNumber(entity.getBlockNumber())
+                .reason(entity.getReason())
+                .startAt(entity.getStartAt())
+                .endAt(entity.getEndAt())
+                .status(entity.getStatus())
+                .createdAt(entity.getCreatedAt())
+                .updatedAt(entity.getUpdatedAt())
+                .cancelledAt(entity.getCancelledAt())
+                .build();
+    }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/infrastructure/mapper/BookingHistoryMapper.java ==========
+package com.flavia.dermobeauty.booking.infrastructure.mapper;
+
+import com.flavia.dermobeauty.booking.domain.BookingHistory;
+import com.flavia.dermobeauty.booking.infrastructure.persistence.BookingHistoryEntity;
+import org.springframework.stereotype.Component;
+
+/**
+ * Mapper between BookingHistory domain entity and BookingHistoryEntity JPA entity.
+ */
+@Component
+public class BookingHistoryMapper {
+
+    /**
+     * Converts a domain BookingHistory to a JPA BookingHistoryEntity.
+     */
+    public BookingHistoryEntity toEntity(BookingHistory history) {
+        if (history == null) {
+            return null;
+        }
+
+        return BookingHistoryEntity.builder()
+                .id(history.getId())
+                .bookingId(history.getBookingId())
+                .eventType(history.getEventType())
+                .actor(history.getActor())
+                .payload(history.getPayload())
+                .createdAt(history.getCreatedAt())
+                .build();
+    }
+
+    /**
+     * Converts a JPA BookingHistoryEntity to a domain BookingHistory.
+     */
+    public BookingHistory toDomain(BookingHistoryEntity entity) {
+        if (entity == null) {
+            return null;
+        }
+
+        return BookingHistory.builder()
+                .id(entity.getId())
+                .bookingId(entity.getBookingId())
+                .eventType(entity.getEventType())
+                .actor(entity.getActor())
+                .payload(entity.getPayload())
+                .createdAt(entity.getCreatedAt())
+                .build();
+    }
+}
+
+
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/infrastructure/mapper/BookingMapper.java ==========
 package com.flavia.dermobeauty.booking.infrastructure.mapper;
 
@@ -3784,12 +5003,14 @@ public class BookingMapper {
                 .id(booking.getId())
                 .bookingNumber(booking.getBookingNumber())
                 .serviceId(booking.getServiceId())
+                .serviceName(booking.getServiceName())
                 .customerName(booking.getCustomerInfo().getName())
                 .customerEmail(booking.getCustomerInfo().getEmail())
                 .customerWhatsapp(booking.getCustomerInfo().getWhatsapp())
                 .customerComments(booking.getCustomerInfo().getComments())
                 .bookingDate(booking.getTimeSlot().getDate())
                 .bookingTime(booking.getTimeSlot().getTime())
+                .startAt(booking.getStartAt())
                 .durationMinutes(booking.getDurationMinutes())
                 .status(booking.getStatus())
                 .paymentStatus(booking.getPaymentStatus())
@@ -3823,8 +5044,10 @@ public class BookingMapper {
                 .id(entity.getId())
                 .bookingNumber(entity.getBookingNumber())
                 .serviceId(entity.getServiceId())
+                .serviceName(entity.getServiceName())
                 .customerInfo(customerInfo)
                 .timeSlot(timeSlot)
+                .startAt(entity.getStartAt())
                 .durationMinutes(entity.getDurationMinutes())
                 .status(entity.getStatus())
                 .paymentStatus(entity.getPaymentStatus())
@@ -3867,6 +5090,141 @@ public class StubNotificationService implements NotificationService {
 }
 
 
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/infrastructure/persistence/BlockEntity.java ==========
+package com.flavia.dermobeauty.booking.infrastructure.persistence;
+
+import com.flavia.dermobeauty.booking.domain.BlockStatus;
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.time.OffsetDateTime;
+
+/**
+ * JPA entity for blocks table.
+ * Infrastructure layer representation of Block aggregate.
+ */
+@Entity
+@Table(name = "blocks")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+@EqualsAndHashCode(onlyExplicitlyIncluded = true)
+public class BlockEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @EqualsAndHashCode.Include
+    private Long id;
+
+    @Column(name = "block_number", nullable = false, unique = true, length = 50)
+    private String blockNumber;
+
+    @Column(nullable = false, length = 500)
+    private String reason;
+
+    @Column(name = "start_at", nullable = false, columnDefinition = "TIMESTAMPTZ")
+    private OffsetDateTime startAt;
+
+    @Column(name = "end_at", nullable = false, columnDefinition = "TIMESTAMPTZ")
+    private OffsetDateTime endAt;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private BlockStatus status;
+
+    @Column(name = "created_at", nullable = false, updatable = false, columnDefinition = "TIMESTAMPTZ")
+    private OffsetDateTime createdAt;
+
+    @Column(name = "updated_at", nullable = false, columnDefinition = "TIMESTAMPTZ")
+    private OffsetDateTime updatedAt;
+
+    @Column(name = "cancelled_at", columnDefinition = "TIMESTAMPTZ")
+    private OffsetDateTime cancelledAt;
+
+    @PrePersist
+    protected void onCreate() {
+        if (createdAt == null) {
+            createdAt = OffsetDateTime.now();
+        }
+        if (updatedAt == null) {
+            updatedAt = OffsetDateTime.now();
+        }
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = OffsetDateTime.now();
+    }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/infrastructure/persistence/BlockRepositoryAdapter.java ==========
+package com.flavia.dermobeauty.booking.infrastructure.persistence;
+
+import com.flavia.dermobeauty.booking.domain.Block;
+import com.flavia.dermobeauty.booking.domain.BlockRepository;
+import com.flavia.dermobeauty.booking.infrastructure.mapper.BlockMapper;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+/**
+ * Adapter implementing BlockRepository using JPA.
+ */
+@Component
+@RequiredArgsConstructor
+public class BlockRepositoryAdapter implements BlockRepository {
+
+    private final JpaBlockRepository jpaRepository;
+    private final BlockMapper mapper;
+
+    @Override
+    public Block save(Block block) {
+        BlockEntity entity = mapper.toEntity(block);
+        BlockEntity saved = jpaRepository.save(entity);
+        return mapper.toDomain(saved);
+    }
+
+    @Override
+    public Optional<Block> findById(Long id) {
+        return jpaRepository.findById(id)
+                .map(mapper::toDomain);
+    }
+
+    @Override
+    public Optional<Block> findByBlockNumber(String blockNumber) {
+        return jpaRepository.findByBlockNumber(blockNumber)
+                .map(mapper::toDomain);
+    }
+
+    @Override
+    public List<Block> findByDateRange(OffsetDateTime from, OffsetDateTime to, boolean includeCancelled) {
+        return jpaRepository.findByDateRange(from, to, includeCancelled)
+                .stream()
+                .map(mapper::toDomain)
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<Block> findActiveBlocksInRange(OffsetDateTime startAt, OffsetDateTime endAt) {
+        return jpaRepository.findActiveBlocksInRange(startAt, endAt)
+                .stream()
+                .map(mapper::toDomain)
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public boolean existsActiveBlockInRange(OffsetDateTime startAt, OffsetDateTime endAt) {
+        return jpaRepository.existsActiveBlockInRange(startAt, endAt);
+    }
+}
+
+
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/infrastructure/persistence/BookingEntity.java ==========
 package com.flavia.dermobeauty.booking.infrastructure.persistence;
 
@@ -3879,6 +5237,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 
 /**
  * JPA entity for bookings table.
@@ -3904,6 +5263,10 @@ public class BookingEntity {
     @Column(name = "service_id", nullable = false)
     private Long serviceId;
 
+    // Service name snapshot (immutable)
+    @Column(name = "service_name", length = 200)
+    private String serviceName;
+
     // Customer information (embedded fields)
     @Column(name = "customer_name", nullable = false, length = 200)
     private String customerName;
@@ -3917,12 +5280,16 @@ public class BookingEntity {
     @Column(name = "customer_comments", columnDefinition = "TEXT")
     private String customerComments;
 
-    // Time slot (embedded fields)
+    // Time slot (legacy fields - kept for backward compatibility)
     @Column(name = "booking_date", nullable = false)
     private LocalDate bookingDate;
 
     @Column(name = "booking_time", nullable = false)
     private LocalTime bookingTime;
+
+    // New datetime field with timezone
+    @Column(name = "start_at", nullable = false, columnDefinition = "TIMESTAMPTZ")
+    private OffsetDateTime startAt;
 
     @Column(name = "duration_minutes", nullable = false)
     private Integer durationMinutes;
@@ -3976,6 +5343,111 @@ public class BookingEntity {
 }
 
 
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/infrastructure/persistence/BookingHistoryEntity.java ==========
+package com.flavia.dermobeauty.booking.infrastructure.persistence;
+
+import com.flavia.dermobeauty.booking.domain.HistoryActor;
+import com.flavia.dermobeauty.booking.domain.HistoryEventType;
+import jakarta.persistence.*;
+import lombok.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
+
+import java.time.OffsetDateTime;
+import java.util.Map;
+
+/**
+ * JPA entity for booking_history table.
+ * Append-only: records are never modified or deleted.
+ */
+@Entity
+@Table(name = "booking_history")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+@EqualsAndHashCode(onlyExplicitlyIncluded = true)
+public class BookingHistoryEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @EqualsAndHashCode.Include
+    private Long id;
+
+    @Column(name = "booking_id", nullable = false)
+    private Long bookingId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "event_type", nullable = false, length = 30)
+    private HistoryEventType eventType;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private HistoryActor actor;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(columnDefinition = "jsonb")
+    private Map<String, Object> payload;
+
+    @Column(name = "created_at", nullable = false, updatable = false, columnDefinition = "TIMESTAMPTZ")
+    private OffsetDateTime createdAt;
+
+    @PrePersist
+    protected void onCreate() {
+        if (createdAt == null) {
+            createdAt = OffsetDateTime.now();
+        }
+    }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/infrastructure/persistence/BookingHistoryRepositoryAdapter.java ==========
+package com.flavia.dermobeauty.booking.infrastructure.persistence;
+
+import com.flavia.dermobeauty.booking.domain.BookingHistory;
+import com.flavia.dermobeauty.booking.domain.BookingHistoryRepository;
+import com.flavia.dermobeauty.booking.infrastructure.mapper.BookingHistoryMapper;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+/**
+ * Adapter implementing BookingHistoryRepository using JPA.
+ */
+@Component
+@RequiredArgsConstructor
+public class BookingHistoryRepositoryAdapter implements BookingHistoryRepository {
+
+    private final JpaBookingHistoryRepository jpaRepository;
+    private final BookingHistoryMapper mapper;
+
+    @Override
+    public BookingHistory save(BookingHistory history) {
+        BookingHistoryEntity entity = mapper.toEntity(history);
+        BookingHistoryEntity saved = jpaRepository.save(entity);
+        return mapper.toDomain(saved);
+    }
+
+    @Override
+    public List<BookingHistory> findByBookingId(Long bookingId) {
+        return jpaRepository.findByBookingIdOrderByCreatedAtDesc(bookingId)
+                .stream()
+                .map(mapper::toDomain)
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<BookingHistory> findByBookingIdOrderByCreatedAtAsc(Long bookingId) {
+        return jpaRepository.findByBookingIdOrderByCreatedAtAsc(bookingId)
+                .stream()
+                .map(mapper::toDomain)
+                .collect(Collectors.toList());
+    }
+}
+
+
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/infrastructure/persistence/BookingRepositoryAdapter.java ==========
 package com.flavia.dermobeauty.booking.infrastructure.persistence;
 
@@ -3988,6 +5460,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -4057,6 +5530,98 @@ public class BookingRepositoryAdapter implements BookingRepository {
                 .map(mapper::toDomain)
                 .collect(Collectors.toList());
     }
+
+    @Override
+    public List<Booking> findByDateRange(OffsetDateTime from, OffsetDateTime to, boolean includeCancelled) {
+        List<BookingEntity> entities = includeCancelled
+                ? jpaRepository.findByDateRangeAll(from, to)
+                : jpaRepository.findByDateRangeExcludingCancelled(from, to);
+
+        return entities.stream()
+                .map(mapper::toDomain)
+                .collect(Collectors.toList());
+    }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/infrastructure/persistence/JpaBlockRepository.java ==========
+package com.flavia.dermobeauty.booking.infrastructure.persistence;
+
+import com.flavia.dermobeauty.booking.domain.BlockStatus;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Spring Data JPA repository for BlockEntity.
+ */
+@Repository
+public interface JpaBlockRepository extends JpaRepository<BlockEntity, Long> {
+
+    Optional<BlockEntity> findByBlockNumber(String blockNumber);
+
+    /**
+     * Find blocks in a date range, optionally including cancelled.
+     */
+    @Query("SELECT b FROM BlockEntity b WHERE " +
+            "b.startAt < :to AND b.endAt > :from " +
+            "AND (:includeCancelled = true OR b.status != 'CANCELLED') " +
+            "ORDER BY b.startAt ASC")
+    List<BlockEntity> findByDateRange(
+            @Param("from") OffsetDateTime from,
+            @Param("to") OffsetDateTime to,
+            @Param("includeCancelled") boolean includeCancelled);
+
+    /**
+     * Find active blocks that overlap with a time range.
+     */
+    @Query("SELECT b FROM BlockEntity b WHERE " +
+            "b.status = 'ACTIVE' " +
+            "AND b.startAt < :endAt AND b.endAt > :startAt")
+    List<BlockEntity> findActiveBlocksInRange(
+            @Param("startAt") OffsetDateTime startAt,
+            @Param("endAt") OffsetDateTime endAt);
+
+    /**
+     * Check if any active block exists in a time range.
+     */
+    @Query("SELECT COUNT(b) > 0 FROM BlockEntity b WHERE " +
+            "b.status = 'ACTIVE' " +
+            "AND b.startAt < :endAt AND b.endAt > :startAt")
+    boolean existsActiveBlockInRange(
+            @Param("startAt") OffsetDateTime startAt,
+            @Param("endAt") OffsetDateTime endAt);
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/infrastructure/persistence/JpaBookingHistoryRepository.java ==========
+package com.flavia.dermobeauty.booking.infrastructure.persistence;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+
+/**
+ * Spring Data JPA repository for BookingHistoryEntity.
+ */
+@Repository
+public interface JpaBookingHistoryRepository extends JpaRepository<BookingHistoryEntity, Long> {
+
+    /**
+     * Find all history entries for a booking, newest first.
+     */
+    List<BookingHistoryEntity> findByBookingIdOrderByCreatedAtDesc(Long bookingId);
+
+    /**
+     * Find all history entries for a booking, oldest first.
+     */
+    List<BookingHistoryEntity> findByBookingIdOrderByCreatedAtAsc(Long bookingId);
 }
 
 
@@ -4071,6 +5636,7 @@ import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -4107,7 +5673,185 @@ public interface JpaBookingRepository extends JpaRepository<BookingEntity, Long>
             @Param("startTime") LocalTime startTime,
             @Param("endTime") LocalTime endTime
     );
+
+    /**
+     * Find bookings in date range, excluding cancelled.
+     */
+    @Query("SELECT b FROM BookingEntity b WHERE b.startAt >= :from AND b.startAt <= :to AND b.status != 'CANCELLED' ORDER BY b.startAt")
+    List<BookingEntity> findByDateRangeExcludingCancelled(
+            @Param("from") OffsetDateTime from,
+            @Param("to") OffsetDateTime to
+    );
+
+    /**
+     * Find all bookings in date range, including cancelled.
+     */
+    @Query("SELECT b FROM BookingEntity b WHERE b.startAt >= :from AND b.startAt <= :to ORDER BY b.startAt")
+    List<BookingEntity> findByDateRangeAll(
+            @Param("from") OffsetDateTime from,
+            @Param("to") OffsetDateTime to
+    );
 }
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/web/AdminCalendarController.java ==========
+package com.flavia.dermobeauty.booking.web;
+
+import com.flavia.dermobeauty.booking.application.usecase.CancelBlockUseCase;
+import com.flavia.dermobeauty.booking.application.usecase.CreateBlockUseCase;
+import com.flavia.dermobeauty.booking.application.usecase.GetCalendarEventsUseCase;
+import com.flavia.dermobeauty.booking.application.usecase.RescheduleBookingUseCase;
+import com.flavia.dermobeauty.booking.application.usecase.UpdateBookingCustomerUseCase;
+import com.flavia.dermobeauty.booking.domain.Block;
+import com.flavia.dermobeauty.booking.domain.Booking;
+import com.flavia.dermobeauty.booking.web.dto.BlockResponse;
+import com.flavia.dermobeauty.booking.web.dto.BookingResponse;
+import com.flavia.dermobeauty.booking.web.dto.CalendarEventResponse;
+import com.flavia.dermobeauty.booking.web.dto.CreateBlockRequest;
+import com.flavia.dermobeauty.booking.web.dto.RescheduleBookingRequest;
+import com.flavia.dermobeauty.booking.web.dto.UpdateCustomerRequest;
+import com.flavia.dermobeauty.shared.web.ApiResponse;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.LocalDate;
+import java.util.List;
+
+/**
+ * Admin controller for calendar operations.
+ * Provides unified view of bookings and blocks, plus management actions.
+ */
+@Slf4j
+@RestController
+@RequestMapping("/api/admin")
+@RequiredArgsConstructor
+public class AdminCalendarController {
+
+    private final GetCalendarEventsUseCase getCalendarEventsUseCase;
+    private final CreateBlockUseCase createBlockUseCase;
+    private final CancelBlockUseCase cancelBlockUseCase;
+    private final RescheduleBookingUseCase rescheduleBookingUseCase;
+    private final UpdateBookingCustomerUseCase updateBookingCustomerUseCase;
+
+    // ==================== CALENDAR ====================
+
+    /**
+     * Get calendar events for a date range.
+     *
+     * @param from start date (required)
+     * @param to end date (required, inclusive)
+     * @param includeCancelled if true, includes cancelled events (default: false)
+     * @return list of calendar events (bookings + blocks merged)
+     */
+    @GetMapping("/calendar")
+    public ResponseEntity<ApiResponse<List<CalendarEventResponse>>> getCalendarEvents(
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
+            @RequestParam(defaultValue = "false") boolean includeCancelled) {
+
+        log.info("GET /api/admin/calendar from={} to={} includeCancelled={}", from, to, includeCancelled);
+
+        List<CalendarEventResponse> events = getCalendarEventsUseCase.execute(from, to, includeCancelled);
+
+        return ResponseEntity.ok(ApiResponse.success(events));
+    }
+
+    // ==================== BLOCKS ====================
+
+    /**
+     * Create a new block.
+     *
+     * @param request block creation request
+     * @return the created block
+     */
+    @PostMapping("/blocks")
+    public ResponseEntity<ApiResponse<BlockResponse>> createBlock(
+            @Valid @RequestBody CreateBlockRequest request) {
+
+        log.info("POST /api/admin/blocks startAt={} endAt={} reason={}",
+                request.getStartAt(), request.getEndAt(), request.getReason());
+
+        Block block = createBlockUseCase.execute(
+                request.getStartAt(),
+                request.getEndAt(),
+                request.getReason()
+        );
+
+        BlockResponse response = BlockResponse.fromDomain(block);
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(ApiResponse.success(response, "Bloqueo creado exitosamente"));
+    }
+
+    /**
+     * Cancel a block.
+     *
+     * @param id block ID
+     * @return the cancelled block
+     */
+    @PatchMapping("/blocks/{id}/cancel")
+    public ResponseEntity<ApiResponse<BlockResponse>> cancelBlock(@PathVariable Long id) {
+
+        log.info("PATCH /api/admin/blocks/{}/cancel", id);
+
+        Block block = cancelBlockUseCase.execute(id);
+
+        BlockResponse response = BlockResponse.fromDomain(block);
+        return ResponseEntity.ok(ApiResponse.success(response, "Bloqueo cancelado exitosamente"));
+    }
+
+    // ==================== BOOKINGS ====================
+
+    /**
+     * Reschedule a booking to a new time.
+     *
+     * @param id booking ID
+     * @param request reschedule request with new start time
+     * @return the rescheduled booking
+     */
+    @PatchMapping("/bookings/{id}/reschedule")
+    public ResponseEntity<ApiResponse<BookingResponse>> rescheduleBooking(
+            @PathVariable Long id,
+            @Valid @RequestBody RescheduleBookingRequest request) {
+
+        log.info("PATCH /api/admin/bookings/{}/reschedule newStartAt={}", id, request.getNewStartAt());
+
+        Booking booking = rescheduleBookingUseCase.execute(id, request.getNewStartAt());
+
+        BookingResponse response = BookingResponse.fromDomain(booking);
+        return ResponseEntity.ok(ApiResponse.success(response, "Turno reprogramado exitosamente"));
+    }
+
+    /**
+     * Update customer information on a booking.
+     *
+     * @param id booking ID
+     * @param request customer info update request
+     * @return the updated booking
+     */
+    @PatchMapping("/bookings/{id}/customer")
+    public ResponseEntity<ApiResponse<BookingResponse>> updateBookingCustomer(
+            @PathVariable Long id,
+            @Valid @RequestBody UpdateCustomerRequest request) {
+
+        log.info("PATCH /api/admin/bookings/{}/customer", id);
+
+        Booking booking = updateBookingCustomerUseCase.execute(
+                id,
+                request.getName(),
+                request.getEmail(),
+                request.getWhatsapp(),
+                request.getComments()
+        );
+
+        BookingResponse response = BookingResponse.fromDomain(booking);
+        return ResponseEntity.ok(ApiResponse.success(response, "Información del cliente actualizada"));
+    }
+}
+
 
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/web/AvailabilityController.java ==========
 package com.flavia.dermobeauty.booking.web;
@@ -4148,6 +5892,8 @@ import com.flavia.dermobeauty.booking.application.usecase.GetBookingByNumberUseC
 import com.flavia.dermobeauty.booking.domain.Booking;
 import com.flavia.dermobeauty.booking.web.dto.BookingResponse;
 import com.flavia.dermobeauty.booking.web.dto.CreateBookingRequest;
+import com.flavia.dermobeauty.catalog.dto.ServiceDto;
+import com.flavia.dermobeauty.catalog.service.ServiceCatalogService;
 import com.flavia.dermobeauty.shared.web.ApiResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -4168,6 +5914,7 @@ public class BookingController {
 
     private final CreateBookingUseCase createBookingUseCase;
     private final GetBookingByNumberUseCase getBookingByNumberUseCase;
+    private final ServiceCatalogService serviceCatalogService;
 
     @PostMapping
     public ResponseEntity<ApiResponse<BookingResponse>> createBooking(
@@ -4176,8 +5923,12 @@ public class BookingController {
         log.info("Creating booking for service {} on {} at {}",
                 request.getServiceId(), request.getBookingDate(), request.getBookingTime());
 
+        // Fetch service to get the name snapshot
+        ServiceDto service = serviceCatalogService.getById(request.getServiceId());
+
         Booking booking = createBookingUseCase.execute(
                 request.getServiceId(),
+                service.getName(),
                 request.getCustomerName(),
                 request.getCustomerEmail(),
                 request.getCustomerWhatsapp(),
@@ -4207,6 +5958,51 @@ public class BookingController {
 }
 
 
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/web/dto/BlockResponse.java ==========
+package com.flavia.dermobeauty.booking.web.dto;
+
+import com.flavia.dermobeauty.booking.domain.Block;
+import com.flavia.dermobeauty.booking.domain.BlockStatus;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.time.OffsetDateTime;
+
+/**
+ * Response DTO for block operations.
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class BlockResponse {
+
+    private Long id;
+    private String blockNumber;
+    private OffsetDateTime startAt;
+    private OffsetDateTime endAt;
+    private String reason;
+    private BlockStatus status;
+    private OffsetDateTime createdAt;
+    private OffsetDateTime cancelledAt;
+
+    public static BlockResponse fromDomain(Block block) {
+        return BlockResponse.builder()
+                .id(block.getId())
+                .blockNumber(block.getBlockNumber())
+                .startAt(block.getStartAt())
+                .endAt(block.getEndAt())
+                .reason(block.getReason())
+                .status(block.getStatus())
+                .createdAt(block.getCreatedAt())
+                .cancelledAt(block.getCancelledAt())
+                .build();
+    }
+}
+
+
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/web/dto/BookingResponse.java ==========
 package com.flavia.dermobeauty.booking.web.dto;
 
@@ -4222,6 +6018,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 
 /**
  * DTO for booking response.
@@ -4235,12 +6032,15 @@ public class BookingResponse {
     private Long id;
     private String bookingNumber;
     private Long serviceId;
+    private String serviceName;
     private String customerName;
     private String customerEmail;
     private String customerWhatsapp;
     private String customerComments;
     private LocalDate bookingDate;
     private LocalTime bookingTime;
+    private OffsetDateTime startAt;
+    private OffsetDateTime endAt;
     private Integer durationMinutes;
     private BookingStatus status;
     private PaymentStatus paymentStatus;
@@ -4254,12 +6054,15 @@ public class BookingResponse {
                 .id(booking.getId())
                 .bookingNumber(booking.getBookingNumber())
                 .serviceId(booking.getServiceId())
+                .serviceName(booking.getServiceName())
                 .customerName(booking.getCustomerInfo().getName())
                 .customerEmail(booking.getCustomerInfo().getEmail())
                 .customerWhatsapp(booking.getCustomerInfo().getWhatsapp())
                 .customerComments(booking.getCustomerInfo().getComments())
                 .bookingDate(booking.getTimeSlot().getDate())
                 .bookingTime(booking.getTimeSlot().getTime())
+                .startAt(booking.getStartAt())
+                .endAt(booking.getEndAt())
                 .durationMinutes(booking.getDurationMinutes())
                 .status(booking.getStatus())
                 .paymentStatus(booking.getPaymentStatus())
@@ -4269,6 +6072,116 @@ public class BookingResponse {
                 .confirmedAt(booking.getConfirmedAt())
                 .build();
     }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/web/dto/CalendarEventResponse.java ==========
+package com.flavia.dermobeauty.booking.web.dto;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.flavia.dermobeauty.booking.domain.Block;
+import com.flavia.dermobeauty.booking.domain.Booking;
+import com.flavia.dermobeauty.booking.domain.PaymentStatus;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.time.OffsetDateTime;
+
+/**
+ * Unified calendar event response.
+ * Discriminated union: type determines which fields are present.
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class CalendarEventResponse {
+
+    public enum EventType {
+        BOOKING,
+        BLOCK
+    }
+
+    private EventType type;
+    private Long id;
+    private OffsetDateTime startAt;
+    private OffsetDateTime endAt;
+    private String status;
+
+    // Booking-only fields
+    private String bookingNumber;
+    private String serviceName;
+    private String customerName;
+    private PaymentStatus paymentStatus;
+
+    // Block-only fields
+    private String blockNumber;
+    private String reason;
+
+    /**
+     * Create CalendarEventResponse from Booking domain.
+     */
+    public static CalendarEventResponse fromBooking(Booking booking) {
+        return CalendarEventResponse.builder()
+                .type(EventType.BOOKING)
+                .id(booking.getId())
+                .startAt(booking.getStartAt())
+                .endAt(booking.getEndAt())
+                .status(booking.getStatus().name())
+                .bookingNumber(booking.getBookingNumber())
+                .serviceName(booking.getServiceName())
+                .customerName(booking.getCustomerInfo().getName())
+                .paymentStatus(booking.getPaymentStatus())
+                .build();
+    }
+
+    /**
+     * Create CalendarEventResponse from Block domain.
+     */
+    public static CalendarEventResponse fromBlock(Block block) {
+        return CalendarEventResponse.builder()
+                .type(EventType.BLOCK)
+                .id(block.getId())
+                .startAt(block.getStartAt())
+                .endAt(block.getEndAt())
+                .status(block.getStatus().name())
+                .blockNumber(block.getBlockNumber())
+                .reason(block.getReason())
+                .build();
+    }
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/web/dto/CreateBlockRequest.java ==========
+package com.flavia.dermobeauty.booking.web.dto;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.time.OffsetDateTime;
+
+/**
+ * Request DTO for creating a block.
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class CreateBlockRequest {
+
+    @NotNull(message = "La hora de inicio es requerida")
+    private OffsetDateTime startAt;
+
+    @NotNull(message = "La hora de fin es requerida")
+    private OffsetDateTime endAt;
+
+    @NotBlank(message = "El motivo del bloqueo es requerido")
+    private String reason;
 }
 
 
@@ -4324,6 +6237,60 @@ public class CreateBookingRequest {
 }
 
 
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/web/dto/RescheduleBookingRequest.java ==========
+package com.flavia.dermobeauty.booking.web.dto;
+
+import jakarta.validation.constraints.NotNull;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.time.OffsetDateTime;
+
+/**
+ * Request DTO for rescheduling a booking.
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class RescheduleBookingRequest {
+
+    @NotNull(message = "La nueva hora de inicio es requerida")
+    private OffsetDateTime newStartAt;
+}
+
+
+========== FILE: ./src/main/java/com/flavia/dermobeauty/booking/web/dto/UpdateCustomerRequest.java ==========
+package com.flavia.dermobeauty.booking.web.dto;
+
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+/**
+ * Request DTO for updating customer information on a booking.
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class UpdateCustomerRequest {
+
+    @NotBlank(message = "El nombre del cliente es requerido")
+    private String name;
+
+    @NotBlank(message = "El email es requerido")
+    @Email(message = "El email no tiene un formato válido")
+    private String email;
+
+    @NotBlank(message = "El WhatsApp es requerido")
+    private String whatsapp;
+
+    private String comments;
+}
+
+
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/catalog/controller/AdminCatalogController.java ==========
 package com.flavia.dermobeauty.catalog.controller;
 
@@ -4338,6 +6305,10 @@ import com.flavia.dermobeauty.shared.web.ApiResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -4393,8 +6364,12 @@ public class AdminCatalogController {
     // ==================== PRODUCTS ====================
 
     @GetMapping("/products")
-    public ResponseEntity<ApiResponse<List<ProductDto>>> getAllProducts() {
-        return ResponseEntity.ok(ApiResponse.success(productService.getAllForAdmin()));
+    public ResponseEntity<ApiResponse<Page<ProductDto>>> getAllProducts(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        Pageable pageable = PageRequest.of(page, size, Sort.by("id").descending());
+        Page<ProductDto> products = productService.getAllForAdminPaginated(pageable);
+        return ResponseEntity.ok(ApiResponse.success(products));
     }
 
     @GetMapping("/products/{id}")
@@ -4582,9 +6557,21 @@ public class FileUploadController {
                 throw new ValidationException("File not found: " + filename);
             }
 
+            // Try to detect content type from file
             String contentType = Files.probeContentType(filePath);
+
+            // Fallback: detect from file extension if probeContentType fails
             if (contentType == null) {
-                contentType = "application/octet-stream";
+                String lowercaseFilename = filename.toLowerCase();
+                if (lowercaseFilename.endsWith(".jpg") || lowercaseFilename.endsWith(".jpeg")) {
+                    contentType = "image/jpeg";
+                } else if (lowercaseFilename.endsWith(".png")) {
+                    contentType = "image/png";
+                } else if (lowercaseFilename.endsWith(".webp")) {
+                    contentType = "image/webp";
+                } else {
+                    contentType = "application/octet-stream";
+                }
             }
 
             return ResponseEntity.ok()
@@ -4816,6 +6803,8 @@ public class ProductDto {
     @DecimalMin(value = "0.0", inclusive = false, message = "Price must be greater than 0")
     private BigDecimal price;
 
+    private BigDecimal offerPrice;
+
     @NotNull(message = "Stock is required")
     @Min(value = 0, message = "Stock cannot be negative")
     private Integer stock;
@@ -4843,6 +6832,7 @@ public class ProductDto {
                 .description(entity.getDescription())
                 .shortDescription(entity.getShortDescription())
                 .price(entity.getPrice())
+                .offerPrice(entity.getOfferPrice())
                 .stock(entity.getStock())
                 .categoryId(entity.getCategory().getId())
                 .categoryName(entity.getCategory().getName())
@@ -4900,6 +6890,10 @@ public class ServiceDto {
     @DecimalMin(value = "0.0", inclusive = false, message = "Price must be greater than 0")
     private BigDecimal price;
 
+    private BigDecimal offerPrice;
+
+    private Boolean isOffer;
+
     @NotNull(message = "Category ID is required")
     private Long categoryId;
 
@@ -4920,6 +6914,8 @@ public class ServiceDto {
                 .shortDescription(entity.getShortDescription())
                 .durationMinutes(entity.getDurationMinutes())
                 .price(entity.getPrice())
+                .offerPrice(entity.getOfferPrice())
+                .isOffer(entity.getIsOffer())
                 .categoryId(entity.getCategory().getId())
                 .categoryName(entity.getCategory().getName())
                 .imageUrl(entity.getImageUrl())
@@ -5035,6 +7031,10 @@ public class ProductEntity {
     @Column(nullable = false, precision = 10, scale = 2)
     private BigDecimal price;
 
+    @Column(name = "offer_price", precision = 10, scale = 2)
+    private BigDecimal offerPrice;
+
+    @Builder.Default
     @Column(nullable = false)
     private Integer stock = 0;
 
@@ -5046,15 +7046,19 @@ public class ProductEntity {
     @Column(name = "image_url", length = 500)
     private String imageUrl;
 
+    @Builder.Default
     @Column(name = "is_featured", nullable = false)
     private Boolean isFeatured = false;
 
+    @Builder.Default
     @Column(name = "is_offer", nullable = false)
     private Boolean isOffer = false;
 
+    @Builder.Default
     @Column(name = "is_trending", nullable = false)
     private Boolean isTrending = false;
 
+    @Builder.Default
     @Column(name = "is_active", nullable = false)
     private Boolean isActive = true;
 
@@ -5122,6 +7126,13 @@ public class ServiceEntity {
     @Column(nullable = false, precision = 10, scale = 2)
     private BigDecimal price;
 
+    @Column(name = "offer_price", precision = 10, scale = 2)
+    private BigDecimal offerPrice;
+
+    @Builder.Default
+    @Column(name = "is_offer", nullable = false)
+    private Boolean isOffer = false;
+
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "category_id", nullable = false)
     @ToString.Exclude
@@ -5130,9 +7141,11 @@ public class ServiceEntity {
     @Column(name = "image_url", length = 500)
     private String imageUrl;
 
+    @Builder.Default
     @Column(name = "is_featured", nullable = false)
     private Boolean isFeatured = false;
 
+    @Builder.Default
     @Column(name = "is_active", nullable = false)
     private Boolean isActive = true;
 
@@ -5256,6 +7269,8 @@ import com.flavia.dermobeauty.catalog.repository.ProductRepository;
 import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -5293,6 +7308,14 @@ public class ProductCatalogService {
                 // Ordenamos por ID o fecha para que no salten en la tabla
                 .sorted((a, b) -> b.getId().compareTo(a.getId()))
                 .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public Page<ProductDto> getAllForAdminPaginated(Pageable pageable) {
+        log.debug("Fetching products for admin with pagination: page={}, size={}",
+                pageable.getPageNumber(), pageable.getPageSize());
+        return productRepository.findAll(pageable)
+                .map(ProductDto::fromEntity);
     }
 
     @Transactional(readOnly = true)
@@ -5360,6 +7383,7 @@ public class ProductCatalogService {
                 .description(dto.getDescription())
                 .shortDescription(dto.getShortDescription())
                 .price(dto.getPrice())
+                .offerPrice(dto.getOfferPrice())
                 .stock(dto.getStock() != null ? dto.getStock() : 0)
                 .category(category)
                 .imageUrl(dto.getImageUrl())
@@ -5390,6 +7414,7 @@ public class ProductCatalogService {
         entity.setDescription(dto.getDescription());
         entity.setShortDescription(dto.getShortDescription());
         entity.setPrice(dto.getPrice());
+        entity.setOfferPrice(dto.getOfferPrice());
         entity.setStock(dto.getStock());
         entity.setImageUrl(dto.getImageUrl());
         entity.setIsFeatured(dto.getIsFeatured());
@@ -5515,6 +7540,8 @@ public class ServiceCatalogService {
                 .shortDescription(dto.getShortDescription())
                 .durationMinutes(dto.getDurationMinutes())
                 .price(dto.getPrice())
+                .offerPrice(dto.getOfferPrice())
+                .isOffer(dto.getIsOffer() != null ? dto.getIsOffer() : false)
                 .category(category)
                 .imageUrl(dto.getImageUrl())
                 .isFeatured(dto.getIsFeatured() != null ? dto.getIsFeatured() : false)
@@ -5543,6 +7570,8 @@ public class ServiceCatalogService {
         entity.setShortDescription(dto.getShortDescription());
         entity.setDurationMinutes(dto.getDurationMinutes());
         entity.setPrice(dto.getPrice());
+        entity.setOfferPrice(dto.getOfferPrice());
+        entity.setIsOffer(dto.getIsOffer());
         entity.setImageUrl(dto.getImageUrl());
         entity.setIsFeatured(dto.getIsFeatured());
         entity.setIsActive(dto.getIsActive());
@@ -5721,11 +7750,20 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
 import java.util.Map;
 
 /**
  * Controller for Mercado Pago webhook notifications.
  * Handles payment status updates from Mercado Pago.
+ *
+ * SECURITY MEASURES IMPLEMENTED:
+ * 1. Never trusts webhook payload directly
+ * 2. Always verifies payment status via Mercado Pago API
+ * 3. Validates payment amount matches booking/order
+ * 4. Prevents duplicate payment processing (idempotency)
+ * 5. Structured logging for security audit trail
+ * 6. Validates external reference format
  *
  * CRITICAL: This endpoint must be publicly accessible (no authentication).
  * Mercado Pago sends IPN notifications here when payment status changes.
@@ -5744,80 +7782,148 @@ public class MercadoPagoWebhookController {
 
     @PostMapping("/webhook")
     public ResponseEntity<Void> handleWebhook(@RequestBody Map<String, Object> payload) {
+        Long paymentId = null;
+        String externalReference = null;
+
         try {
-            log.info("Received MP webhook: {}", payload);
+            // SECURITY: Log raw webhook received (audit trail)
+            log.info("[WEBHOOK-RECEIVED] Payload type: {}, data: {}",
+                    payload.get("type"),
+                    payload.get("data"));
 
+            // Step 1: Validate webhook payload structure
             String type = (String) payload.get("type");
-
             if (!"payment".equals(type)) {
-                log.debug("Ignoring non-payment notification: {}", type);
+                log.debug("[WEBHOOK-IGNORED] Non-payment notification type: {}", type);
                 return ResponseEntity.ok().build();
             }
 
             Map<String, Object> data = (Map<String, Object>) payload.get("data");
             if (data == null) {
-                log.warn("Webhook data is null");
+                log.warn("[WEBHOOK-REJECTED] Webhook data is null");
                 return ResponseEntity.ok().build();
             }
 
             String paymentIdStr = (String) data.get("id");
             if (paymentIdStr == null) {
-                log.warn("Payment ID is null in webhook data");
+                log.warn("[WEBHOOK-REJECTED] Payment ID is null in webhook data");
                 return ResponseEntity.ok().build();
             }
 
-            Long paymentId = Long.parseLong(paymentIdStr);
-            log.info("Processing payment notification for payment ID: {}", paymentId);
+            // Step 2: Extract payment ID from webhook
+            try {
+                paymentId = Long.parseLong(paymentIdStr);
+            } catch (NumberFormatException e) {
+                log.error("[WEBHOOK-REJECTED] Invalid payment ID format: {}", paymentIdStr);
+                return ResponseEntity.ok().build();
+            }
 
-            // Fetch payment details from Mercado Pago
-            Payment payment = paymentClient.get(paymentId);
-            log.info("Payment status: {}, External reference: {}",
-                    payment.getStatus(), payment.getExternalReference());
+            log.info("[WEBHOOK-PROCESSING] Payment ID: {}", paymentId);
 
-            // Only process approved payments
+            // CRITICAL SECURITY STEP 3: Verify payment directly with Mercado Pago API
+            // NEVER trust the webhook payload alone - always verify with the source
+            Payment payment;
+            try {
+                payment = paymentClient.get(paymentId);
+                log.info("[MP-API-VERIFIED] Payment ID: {}, Status: {}, Amount: {}, External Ref: {}",
+                        paymentId,
+                        payment.getStatus(),
+                        payment.getTransactionAmount(),
+                        payment.getExternalReference());
+            } catch (MPException | MPApiException e) {
+                log.error("[MP-API-ERROR] Failed to verify payment {}: {}", paymentId, e.getMessage(), e);
+                throw e;
+            }
+
+            // SECURITY VALIDATION 1: Only process approved payments
             if (!"approved".equals(payment.getStatus())) {
-                log.info("Payment {} not approved yet (status: {}), skipping confirmation",
+                log.warn("[PAYMENT-NOT-APPROVED] Payment {} has status '{}', expected 'approved'. Skipping.",
                         paymentId, payment.getStatus());
                 return ResponseEntity.ok().build();
             }
 
-            String externalReference = payment.getExternalReference();
-            if (externalReference == null) {
-                log.warn("External reference is null for payment {}", paymentId);
+            // SECURITY VALIDATION 2: Validate external reference exists and format
+            externalReference = payment.getExternalReference();
+            if (externalReference == null || externalReference.isBlank()) {
+                log.error("[SECURITY-VIOLATION] Payment {} has no external reference", paymentId);
                 return ResponseEntity.ok().build();
             }
 
-            // Update payment ID in booking/order and confirm
-            if (externalReference.startsWith("BOOKING-")) {
-                confirmBookingPayment(externalReference, String.valueOf(paymentId));
-            } else if (externalReference.startsWith("ORDER-")) {
-                confirmOrderPayment(externalReference, String.valueOf(paymentId));
-            } else {
-                log.warn("Unknown external reference format: {}", externalReference);
+            if (!externalReference.matches("^(BOOKING|ORDER)-[A-Z0-9]+$")) {
+                log.error("[SECURITY-VIOLATION] Invalid external reference format: {}", externalReference);
+                return ResponseEntity.ok().build();
             }
 
+            // Step 4: Route to appropriate payment confirmation handler
+            if (externalReference.startsWith("BOOKING-")) {
+                confirmBookingPayment(payment, externalReference, String.valueOf(paymentId));
+            } else if (externalReference.startsWith("ORDER-")) {
+                confirmOrderPayment(payment, externalReference, String.valueOf(paymentId));
+            } else {
+                log.error("[SECURITY-VIOLATION] Unknown external reference prefix: {}", externalReference);
+            }
+
+            log.info("[WEBHOOK-SUCCESS] Payment {} processed successfully", paymentId);
             return ResponseEntity.ok().build();
 
         } catch (MPApiException e) {
-            log.error("MP API error processing webhook: {} - {}", e.getStatusCode(), e.getMessage(), e);
+            log.error("[MP-API-ERROR] Payment: {}, Ref: {}, Status: {}, Message: {}",
+                    paymentId, externalReference, e.getStatusCode(), e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.OK).build(); // Always return 200 to MP
         } catch (MPException e) {
-            log.error("MP error processing webhook: {}", e.getMessage(), e);
+            log.error("[MP-ERROR] Payment: {}, Ref: {}, Message: {}",
+                    paymentId, externalReference, e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.OK).build();
         } catch (Exception e) {
-            log.error("Unexpected error processing webhook", e);
+            log.error("[WEBHOOK-ERROR] Payment: {}, Ref: {}, Unexpected error",
+                    paymentId, externalReference, e);
             return ResponseEntity.status(HttpStatus.OK).build(); // Always return 200 to MP
         }
     }
 
-    private void confirmBookingPayment(String externalReference, String paymentId) {
+    private void confirmBookingPayment(Payment payment, String externalReference, String paymentId) {
+        String bookingNumber = null;
         try {
-            String bookingNumber = externalReference.replace("BOOKING-", "");
-            log.info("Confirming payment for booking: {}", bookingNumber);
+            bookingNumber = externalReference.replace("BOOKING-", "");
+            log.info("[BOOKING-CONFIRMATION-START] Booking: {}, Payment: {}", bookingNumber, paymentId);
 
-            // Find booking and update payment ID first
+            // Create final variable for lambda expression
+            final String finalBookingNumber = bookingNumber;
+
+            // Find booking
             Booking booking = bookingRepository.findByBookingNumber(bookingNumber)
-                    .orElseThrow(() -> new RuntimeException("Booking not found: " + bookingNumber));
+                    .orElseThrow(() -> {
+                        log.error("[SECURITY-VIOLATION] Booking not found: {}", finalBookingNumber);
+                        return new RuntimeException("Booking not found: " + finalBookingNumber);
+                    });
+
+            // SECURITY VALIDATION 3: Idempotency - Check if payment already processed
+            if (booking.getMercadoPagoPaymentId() != null &&
+                    booking.getMercadoPagoPaymentId().equals(paymentId)) {
+                log.warn("[DUPLICATE-PAYMENT] Booking {} already has payment {} processed. Ignoring duplicate notification.",
+                        bookingNumber, paymentId);
+                return;
+            }
+
+            // SECURITY VALIDATION 4: Prevent different payment ID for same booking
+            if (booking.getMercadoPagoPaymentId() != null &&
+                    !booking.getMercadoPagoPaymentId().equals(paymentId)) {
+                log.error("[SECURITY-VIOLATION] Booking {} already has different payment ID: {}. Rejecting new payment: {}",
+                        bookingNumber, booking.getMercadoPagoPaymentId(), paymentId);
+                throw new RuntimeException("Booking already has a different payment ID");
+            }
+
+            // SECURITY VALIDATION 5: Verify payment amount matches booking amount
+            BigDecimal paymentAmount = payment.getTransactionAmount();
+            BigDecimal bookingAmount = booking.getAmount();
+
+            if (paymentAmount == null || paymentAmount.compareTo(bookingAmount) != 0) {
+                log.error("[SECURITY-VIOLATION] Amount mismatch! Booking {}: expected {}, got {}",
+                        bookingNumber, bookingAmount, paymentAmount);
+                throw new RuntimeException("Payment amount does not match booking amount");
+            }
+
+            log.info("[AMOUNT-VERIFIED] Booking {}: {} ARS", bookingNumber, paymentAmount);
 
             // Update booking with payment ID
             Booking updatedBooking = Booking.builder()
@@ -5839,25 +7945,62 @@ public class MercadoPagoWebhookController {
                     .build();
 
             bookingRepository.save(updatedBooking);
+            log.info("[BOOKING-UPDATED] Booking {} updated with payment ID {}", bookingNumber, paymentId);
 
-            // Confirm payment via use case
+            // Confirm payment via use case (sends confirmation email, updates status)
             confirmBookingPaymentUseCase.execute(paymentId);
-            log.info("Booking payment confirmed successfully: {}", bookingNumber);
+            log.info("[BOOKING-CONFIRMATION-SUCCESS] Booking {} payment confirmed successfully", bookingNumber);
 
         } catch (Exception e) {
-            log.error("Error confirming booking payment", e);
+            log.error("[BOOKING-CONFIRMATION-FAILED] Booking: {}, Payment: {}, Error: {}",
+                    bookingNumber, paymentId, e.getMessage(), e);
             throw new RuntimeException("Error confirming booking payment", e);
         }
     }
 
-    private void confirmOrderPayment(String externalReference, String paymentId) {
+    private void confirmOrderPayment(Payment payment, String externalReference, String paymentId) {
+        String orderNumber = null;
         try {
-            String orderNumber = externalReference.replace("ORDER-", "");
-            log.info("Confirming payment for order: {}", orderNumber);
+            orderNumber = externalReference.replace("ORDER-", "");
+            log.info("[ORDER-CONFIRMATION-START] Order: {}, Payment: {}", orderNumber, paymentId);
 
-            // Find order and update payment ID first
+            // Create final variable for lambda expression
+            final String finalOrderNumber = orderNumber;
+
+            // Find order
             Order order = orderRepository.findByOrderNumber(orderNumber)
-                    .orElseThrow(() -> new RuntimeException("Order not found: " + orderNumber));
+                    .orElseThrow(() -> {
+                        log.error("[SECURITY-VIOLATION] Order not found: {}", finalOrderNumber);
+                        return new RuntimeException("Order not found: " + finalOrderNumber);
+                    });
+
+            // SECURITY VALIDATION 3: Idempotency - Check if payment already processed
+            if (order.getMercadoPagoPaymentId() != null &&
+                    order.getMercadoPagoPaymentId().equals(paymentId)) {
+                log.warn("[DUPLICATE-PAYMENT] Order {} already has payment {} processed. Ignoring duplicate notification.",
+                        orderNumber, paymentId);
+                return;
+            }
+
+            // SECURITY VALIDATION 4: Prevent different payment ID for same order
+            if (order.getMercadoPagoPaymentId() != null &&
+                    !order.getMercadoPagoPaymentId().equals(paymentId)) {
+                log.error("[SECURITY-VIOLATION] Order {} already has different payment ID: {}. Rejecting new payment: {}",
+                        orderNumber, order.getMercadoPagoPaymentId(), paymentId);
+                throw new RuntimeException("Order already has a different payment ID");
+            }
+
+            // SECURITY VALIDATION 5: Verify payment amount matches order total
+            BigDecimal paymentAmount = payment.getTransactionAmount();
+            BigDecimal orderTotal = order.getTotal();
+
+            if (paymentAmount == null || paymentAmount.compareTo(orderTotal) != 0) {
+                log.error("[SECURITY-VIOLATION] Amount mismatch! Order {}: expected {}, got {}",
+                        orderNumber, orderTotal, paymentAmount);
+                throw new RuntimeException("Payment amount does not match order total");
+            }
+
+            log.info("[AMOUNT-VERIFIED] Order {}: {} ARS", orderNumber, paymentAmount);
 
             // Update order with payment ID
             Order updatedOrder = Order.builder()
@@ -5878,13 +8021,15 @@ public class MercadoPagoWebhookController {
                     .build();
 
             orderRepository.save(updatedOrder);
+            log.info("[ORDER-UPDATED] Order {} updated with payment ID {}", orderNumber, paymentId);
 
             // Confirm payment via use case (decrements stock, sends email)
             confirmOrderPaymentUseCase.execute(paymentId);
-            log.info("Order payment confirmed successfully: {}", orderNumber);
+            log.info("[ORDER-CONFIRMATION-SUCCESS] Order {} payment confirmed successfully", orderNumber);
 
         } catch (Exception e) {
-            log.error("Error confirming order payment", e);
+            log.error("[ORDER-CONFIRMATION-FAILED] Order: {}, Payment: {}, Error: {}",
+                    orderNumber, paymentId, e.getMessage(), e);
             throw new RuntimeException("Error confirming order payment", e);
         }
     }
@@ -6559,13 +8704,15 @@ import com.flavia.dermobeauty.sales.domain.OrderRepository;
 import com.flavia.dermobeauty.sales.domain.OrderStatus;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
 /**
  * Use Case: List orders for admin panel.
- * Supports filtering by status.
+ * Supports filtering by status and pagination.
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -6579,6 +8726,12 @@ public class ListOrdersUseCase {
         return orderRepository.findAll();
     }
 
+    @Transactional(readOnly = true)
+    public Page<Order> executePaginated(Pageable pageable) {
+        log.debug("Fetching orders with pagination: page={}, size={}",
+                pageable.getPageNumber(), pageable.getPageSize());
+        return orderRepository.findAll(pageable);
+    }
 
     public List<Order> executeByStatus(OrderStatus status) {
         log.debug("Fetching orders with status: {}", status);
@@ -6997,6 +9150,9 @@ public class Order {
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/sales/domain/OrderRepository.java ==========
 package com.flavia.dermobeauty.sales.domain;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+
 import java.util.List;
 import java.util.Optional;
 
@@ -7031,6 +9187,11 @@ public interface OrderRepository {
      * Find all orders (for admin).
      */
     List<Order> findAll();
+
+    /**
+     * Find all orders with pagination (for admin).
+     */
+    Page<Order> findAll(Pageable pageable);
 
     /**
      * Find orders by status (for admin filtering).
@@ -7459,6 +9620,8 @@ import com.flavia.dermobeauty.sales.domain.OrderRepository;
 import com.flavia.dermobeauty.sales.domain.OrderStatus;
 import com.flavia.dermobeauty.sales.infrastructure.mapper.OrderMapper;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional; // <--- IMPORTANTE
 
@@ -7509,6 +9672,13 @@ public class OrderRepositoryAdapter implements OrderRepository {
                 .stream()
                 .map(mapper::toDomain)
                 .collect(Collectors.toList());
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Page<Order> findAll(Pageable pageable) {
+        return jpaRepository.findAll(pageable)
+                .map(mapper::toDomain);
     }
 
     @Override
@@ -7567,8 +9737,11 @@ public class StockServiceImpl implements StockService {
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/sales/web/AdminOperationsController.java ==========
 package com.flavia.dermobeauty.sales.web;
 
+import com.flavia.dermobeauty.booking.application.usecase.CancelBlockUseCase;
 import com.flavia.dermobeauty.booking.application.usecase.CancelBookingUseCase;
+import com.flavia.dermobeauty.booking.application.usecase.CreateBlockUseCase;
 import com.flavia.dermobeauty.booking.application.usecase.ListBookingsUseCase;
+import com.flavia.dermobeauty.booking.application.usecase.RescheduleBookingUseCase;
 import com.flavia.dermobeauty.booking.domain.Booking;
 import com.flavia.dermobeauty.booking.web.dto.BookingResponse;
 import com.flavia.dermobeauty.sales.application.usecase.ListOrdersUseCase;
@@ -7579,9 +9752,16 @@ import com.flavia.dermobeauty.sales.web.dto.OrderResponse;
 import com.flavia.dermobeauty.shared.web.ApiResponse;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -7590,8 +9770,13 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class AdminOperationsController {
 
+    private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
+
     private final ListBookingsUseCase listBookingsUseCase;
     private final CancelBookingUseCase cancelBookingUseCase;
+    private final RescheduleBookingUseCase rescheduleBookingUseCase;
+    private final CreateBlockUseCase createBlockUseCase;
+    private final CancelBlockUseCase cancelBlockUseCase;
     private final ListOrdersUseCase listOrdersUseCase;
     private final UpdateOrderStatusUseCase updateOrderStatusUseCase;
 
@@ -7611,13 +9796,28 @@ public class AdminOperationsController {
         return ResponseEntity.ok(ApiResponse.success("Turno cancelado"));
     }
 
+    @PatchMapping("/bookings/{id}/reschedule")
+    public ResponseEntity<ApiResponse<BookingResponse>> rescheduleBooking(
+            @PathVariable Long id,
+            @RequestBody RescheduleRequest request) {
+        // Convert LocalDate + LocalTime to OffsetDateTime
+        OffsetDateTime newStartAt = LocalDateTime.of(request.getBookingDate(), request.getBookingTime())
+                .atZone(ARGENTINA_ZONE)
+                .toOffsetDateTime();
+
+        Booking updated = rescheduleBookingUseCase.execute(id, newStartAt);
+        return ResponseEntity.ok(ApiResponse.success(BookingResponse.fromDomain(updated)));
+    }
+
     // ==================== ORDERS ====================
 
     @GetMapping("/orders")
-    public ResponseEntity<ApiResponse<List<OrderResponse>>> getOrders() {
-        List<OrderResponse> orders = listOrdersUseCase.execute().stream()
-                .map(OrderResponse::fromDomain)
-                .collect(Collectors.toList());
+    public ResponseEntity<ApiResponse<Page<OrderResponse>>> getOrders(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        Pageable pageable = PageRequest.of(page, size, Sort.by("id").descending());
+        Page<OrderResponse> orders = listOrdersUseCase.executePaginated(pageable)
+                .map(OrderResponse::fromDomain);
         return ResponseEntity.ok(ApiResponse.success(orders));
     }
 
@@ -7633,6 +9833,18 @@ public class AdminOperationsController {
     @Data
     public static class UpdateStatusRequest {
         private OrderStatus status;
+    }
+
+    @Data
+    public static class RescheduleRequest {
+        private java.time.LocalDate bookingDate;
+        private java.time.LocalTime bookingTime;
+    }
+
+    @Data
+    public static class BlockDayRequest {
+        private java.time.LocalDate date;
+        private String reason; // Optional reason (e.g., "Holiday - Christmas")
     }
 }
 
@@ -8226,6 +10438,26 @@ public class JwtTokenProvider {
 }
 
 
+========== FILE: ./src/main/java/com/flavia/dermobeauty/shared/exception/ConflictException.java ==========
+package com.flavia.dermobeauty.shared.exception;
+
+/**
+ * Exception for conflict errors (409).
+ * Used when an operation cannot be completed due to resource conflicts
+ * (e.g., time slot already occupied).
+ */
+public class ConflictException extends RuntimeException {
+
+    public ConflictException(String message) {
+        super(message);
+    }
+
+    public ConflictException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+
+
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/shared/exception/DomainException.java ==========
 package com.flavia.dermobeauty.shared.exception;
 
@@ -8388,6 +10620,7 @@ public class ErrorResponse {
 ========== FILE: ./src/main/java/com/flavia/dermobeauty/shared/web/GlobalExceptionHandler.java ==========
 package com.flavia.dermobeauty.shared.web;
 
+import com.flavia.dermobeauty.shared.exception.ConflictException;
 import com.flavia.dermobeauty.shared.exception.DomainException;
 import com.flavia.dermobeauty.shared.exception.PaymentException;
 import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
@@ -8482,6 +10715,22 @@ public class GlobalExceptionHandler {
         );
 
         return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(error);
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ErrorResponse> handleConflict(
+            ConflictException ex,
+            HttpServletRequest request) {
+
+        log.warn("Conflict error: {}", ex.getMessage());
+
+        ErrorResponse error = new ErrorResponse(
+                "CONFLICT",
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(error);
     }
 
     @ExceptionHandler(DomainException.class)
@@ -8604,6 +10853,266 @@ server:
   error:
     include-message: always
     include-binding-errors: always
+
+
+========== FILE: ./src/main/resources/db/migration/V10__create_blocks_table.sql ==========
+-- V10: Create blocks table for schedule blocking
+-- Blocks are separate from bookings (not "fake bookings")
+
+CREATE TABLE blocks (
+    id BIGSERIAL PRIMARY KEY,
+    block_number VARCHAR(50) NOT NULL UNIQUE,
+    reason VARCHAR(500) NOT NULL,
+
+    -- Time range (both stored as TIMESTAMPTZ for timezone safety)
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+
+    -- Status (ACTIVE or CANCELLED)
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE'
+        CHECK (status IN ('ACTIVE', 'CANCELLED')),
+
+    -- Timestamps
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    cancelled_at TIMESTAMPTZ,
+
+    -- Constraints
+    CONSTRAINT chk_block_end_after_start CHECK (end_at > start_at),
+    CONSTRAINT chk_block_aligned_start CHECK (EXTRACT(MINUTE FROM start_at) IN (0, 30)),
+    CONSTRAINT chk_block_aligned_end CHECK (EXTRACT(MINUTE FROM end_at) IN (0, 30))
+);
+
+-- Indexes for performance
+CREATE INDEX idx_blocks_number ON blocks(block_number);
+CREATE INDEX idx_blocks_status ON blocks(status);
+CREATE INDEX idx_blocks_start_at ON blocks(start_at);
+CREATE INDEX idx_blocks_time_range ON blocks(start_at, end_at);
+
+-- Partial index for active blocks (used in collision queries)
+CREATE INDEX idx_blocks_active ON blocks(start_at, end_at) WHERE status = 'ACTIVE';
+
+-- Comments
+COMMENT ON TABLE blocks IS 'Schedule blocks for holidays, personal days, etc. Separate from bookings.';
+COMMENT ON COLUMN blocks.block_number IS 'Human-readable reference (BLOCK-{ULID})';
+COMMENT ON COLUMN blocks.reason IS 'Reason for blocking (e.g., "Feriado", "Vacaciones")';
+COMMENT ON COLUMN blocks.start_at IS 'Block start time with timezone (TIMESTAMPTZ)';
+COMMENT ON COLUMN blocks.end_at IS 'Block end time with timezone (TIMESTAMPTZ)';
+
+
+========== FILE: ./src/main/resources/db/migration/V11__add_booking_datetime_columns.sql ==========
+-- V11: Add start_at and service_name to bookings
+-- Also update status CHECK to include BLOCKED (backward compatibility during migration)
+
+-- 1. Add new columns (nullable initially for migration)
+ALTER TABLE bookings ADD COLUMN start_at TIMESTAMPTZ;
+ALTER TABLE bookings ADD COLUMN service_name VARCHAR(200);
+
+-- 2. Populate start_at from booking_date + booking_time (assume Buenos Aires timezone)
+UPDATE bookings
+SET start_at = (booking_date + booking_time) AT TIME ZONE 'America/Argentina/Buenos_Aires';
+
+-- 3. Populate service_name from services table
+UPDATE bookings b
+SET service_name = s.name
+FROM services s
+WHERE b.service_id = s.id;
+
+-- 4. Make start_at NOT NULL (service_name can be null for BLOCKED bookings)
+ALTER TABLE bookings ALTER COLUMN start_at SET NOT NULL;
+
+-- 5. Update status CHECK constraint to include BLOCKED
+ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_status_check;
+ALTER TABLE bookings ADD CONSTRAINT bookings_status_check
+    CHECK (status IN ('PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'BLOCKED'));
+
+-- 6. Fix existing duration_minutes to be multiples of 30 (round up)
+-- e.g., 45 -> 60, 50 -> 60
+UPDATE bookings
+SET duration_minutes = CEIL(duration_minutes::numeric / 30) * 30
+WHERE duration_minutes % 30 != 0;
+
+-- Also fix services table durations
+UPDATE services
+SET duration_minutes = CEIL(duration_minutes::numeric / 30) * 30
+WHERE duration_minutes % 30 != 0;
+
+-- 7. Add constraint for slot alignment (30 min intervals)
+ALTER TABLE bookings ADD CONSTRAINT chk_booking_aligned_start
+    CHECK (EXTRACT(MINUTE FROM start_at) IN (0, 30));
+
+-- 8. Add constraint for duration (multiple of 30)
+ALTER TABLE bookings ADD CONSTRAINT chk_booking_duration_aligned
+    CHECK (duration_minutes > 0 AND duration_minutes % 30 = 0);
+
+-- 9. Indexes for new columns
+CREATE INDEX idx_bookings_start_at ON bookings(start_at);
+
+-- Partial index for bookings that "occupy" time slots (for collision queries)
+CREATE INDEX idx_bookings_occupying ON bookings(start_at, duration_minutes)
+    WHERE status IN ('PENDING', 'CONFIRMED');
+
+-- Comments
+COMMENT ON COLUMN bookings.start_at IS 'Booking start time with timezone (TIMESTAMPTZ). Replaces booking_date + booking_time.';
+COMMENT ON COLUMN bookings.service_name IS 'Snapshot of service name at booking creation (immutable for historical accuracy)';
+
+
+========== FILE: ./src/main/resources/db/migration/V12__create_booking_history_table.sql ==========
+-- V12: Create booking_history table for audit trail
+-- Append-only table: records are never modified or deleted
+
+CREATE TABLE booking_history (
+    id BIGSERIAL PRIMARY KEY,
+    booking_id BIGINT NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+
+    -- Event type enum (stored as string for flexibility)
+    event_type VARCHAR(30) NOT NULL
+        CHECK (event_type IN ('CREATED', 'STATUS_CHANGED', 'RESCHEDULED', 'CUSTOMER_UPDATED', 'PAYMENT_UPDATED')),
+
+    -- Who made the change
+    actor VARCHAR(20) NOT NULL
+        CHECK (actor IN ('ADMIN', 'SYSTEM', 'CUSTOMER')),
+
+    -- What changed (JSON diff)
+    payload JSONB,
+
+    -- When it happened (TIMESTAMPTZ for timezone safety)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for performance
+CREATE INDEX idx_booking_history_booking_id ON booking_history(booking_id);
+CREATE INDEX idx_booking_history_event_type ON booking_history(event_type);
+CREATE INDEX idx_booking_history_created_at ON booking_history(created_at);
+
+-- GIN index for JSONB payload queries (optional, for future auditing)
+CREATE INDEX idx_booking_history_payload ON booking_history USING GIN (payload);
+
+-- Comments
+COMMENT ON TABLE booking_history IS 'Audit trail for booking changes. Append-only: never modify or delete records.';
+COMMENT ON COLUMN booking_history.event_type IS 'Type of change: CREATED, STATUS_CHANGED, RESCHEDULED, CUSTOMER_UPDATED, PAYMENT_UPDATED';
+COMMENT ON COLUMN booking_history.actor IS 'Who made the change: ADMIN, SYSTEM, or CUSTOMER';
+COMMENT ON COLUMN booking_history.payload IS 'JSON diff of what changed (e.g., {"old_status": "PENDING", "new_status": "CONFIRMED"})';
+
+
+========== FILE: ./src/main/resources/db/migration/V13__create_collision_triggers.sql ==========
+-- V13: Create triggers for collision detection (concurrency safety)
+-- This ensures no double-booking even under concurrent requests
+
+-- Create a lock table for serializing collision checks
+CREATE TABLE agenda_lock (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    CONSTRAINT single_row CHECK (id = 1)
+);
+INSERT INTO agenda_lock (id) VALUES (1);
+
+-- Function to check booking collision
+CREATE OR REPLACE FUNCTION check_booking_collision()
+RETURNS TRIGGER AS $$
+DECLARE
+    new_end_at TIMESTAMPTZ;
+    collision_count INTEGER;
+BEGIN
+    -- Only check for bookings that "occupy" time (PENDING or CONFIRMED)
+    IF NEW.status NOT IN ('PENDING', 'CONFIRMED') THEN
+        RETURN NEW;
+    END IF;
+
+    -- Calculate end time
+    new_end_at := NEW.start_at + (NEW.duration_minutes * INTERVAL '1 minute');
+
+    -- Acquire advisory lock for serialization (prevents race conditions)
+    PERFORM pg_advisory_xact_lock(hashtext('agenda_collision'));
+
+    -- Check collision with other bookings that occupy time
+    SELECT COUNT(*) INTO collision_count
+    FROM bookings b
+    WHERE b.status IN ('PENDING', 'CONFIRMED')
+      AND b.id IS DISTINCT FROM NEW.id  -- Exclude self (for updates/reschedule)
+      AND b.start_at < new_end_at
+      AND (b.start_at + (b.duration_minutes * INTERVAL '1 minute')) > NEW.start_at;
+
+    IF collision_count > 0 THEN
+        RAISE EXCEPTION 'slot_occupied: Time slot conflicts with existing booking'
+            USING ERRCODE = '23P01';  -- exclusion_violation
+    END IF;
+
+    -- Check collision with active blocks
+    SELECT COUNT(*) INTO collision_count
+    FROM blocks bl
+    WHERE bl.status = 'ACTIVE'
+      AND bl.start_at < new_end_at
+      AND bl.end_at > NEW.start_at;
+
+    IF collision_count > 0 THEN
+        RAISE EXCEPTION 'slot_occupied: Time slot conflicts with existing block'
+            USING ERRCODE = '23P01';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to check block collision
+CREATE OR REPLACE FUNCTION check_block_collision()
+RETURNS TRIGGER AS $$
+DECLARE
+    collision_count INTEGER;
+BEGIN
+    -- Only check for ACTIVE blocks
+    IF NEW.status != 'ACTIVE' THEN
+        RETURN NEW;
+    END IF;
+
+    -- Acquire advisory lock for serialization
+    PERFORM pg_advisory_xact_lock(hashtext('agenda_collision'));
+
+    -- Check collision with bookings that occupy time
+    SELECT COUNT(*) INTO collision_count
+    FROM bookings b
+    WHERE b.status IN ('PENDING', 'CONFIRMED')
+      AND b.start_at < NEW.end_at
+      AND (b.start_at + (b.duration_minutes * INTERVAL '1 minute')) > NEW.start_at;
+
+    IF collision_count > 0 THEN
+        RAISE EXCEPTION 'slot_occupied: Block conflicts with existing booking'
+            USING ERRCODE = '23P01';
+    END IF;
+
+    -- Check collision with other active blocks
+    SELECT COUNT(*) INTO collision_count
+    FROM blocks bl
+    WHERE bl.status = 'ACTIVE'
+      AND bl.id IS DISTINCT FROM NEW.id  -- Exclude self (for updates)
+      AND bl.start_at < NEW.end_at
+      AND bl.end_at > NEW.start_at;
+
+    IF collision_count > 0 THEN
+        RAISE EXCEPTION 'slot_occupied: Block conflicts with existing block'
+            USING ERRCODE = '23P01';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create triggers
+CREATE TRIGGER trg_check_booking_collision
+    BEFORE INSERT OR UPDATE ON bookings
+    FOR EACH ROW
+    EXECUTE FUNCTION check_booking_collision();
+
+CREATE TRIGGER trg_check_block_collision
+    BEFORE INSERT OR UPDATE ON blocks
+    FOR EACH ROW
+    EXECUTE FUNCTION check_block_collision();
+
+-- Drop the old unique index that was per-service (we use global collision now)
+DROP INDEX IF EXISTS idx_bookings_unique_slot;
+
+-- Comments
+COMMENT ON FUNCTION check_booking_collision() IS 'Trigger function to prevent booking collisions (double-booking). Uses advisory lock for concurrency safety.';
+COMMENT ON FUNCTION check_block_collision() IS 'Trigger function to prevent block collisions. Uses advisory lock for concurrency safety.';
 
 
 ========== FILE: ./src/main/resources/db/migration/V1__create_categories_table.sql ==========
@@ -9053,5 +11562,14 @@ INSERT INTO app_config (config_key, config_value, description) VALUES
 -- =====================================================
 -- FIN DE DATOS INICIALES
 -- =====================================================
+
+
+========== FILE: ./src/main/resources/db/migration/V9__add_offer_price_columns.sql ==========
+-- Add offer_price column to products table
+ALTER TABLE products ADD COLUMN IF NOT EXISTS offer_price DECIMAL(10, 2);
+
+-- Add offer_price and is_offer columns to services table
+ALTER TABLE services ADD COLUMN IF NOT EXISTS offer_price DECIMAL(10, 2);
+ALTER TABLE services ADD COLUMN IF NOT EXISTS is_offer BOOLEAN NOT NULL DEFAULT FALSE;
 
 

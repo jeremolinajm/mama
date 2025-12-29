@@ -12,6 +12,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 
 /**
  * DTO for booking response.
@@ -25,12 +26,15 @@ public class BookingResponse {
     private Long id;
     private String bookingNumber;
     private Long serviceId;
+    private String serviceName;
     private String customerName;
     private String customerEmail;
     private String customerWhatsapp;
     private String customerComments;
     private LocalDate bookingDate;
     private LocalTime bookingTime;
+    private OffsetDateTime startAt;
+    private OffsetDateTime endAt;
     private Integer durationMinutes;
     private BookingStatus status;
     private PaymentStatus paymentStatus;
@@ -44,12 +48,15 @@ public class BookingResponse {
                 .id(booking.getId())
                 .bookingNumber(booking.getBookingNumber())
                 .serviceId(booking.getServiceId())
+                .serviceName(booking.getServiceName())
                 .customerName(booking.getCustomerInfo().getName())
                 .customerEmail(booking.getCustomerInfo().getEmail())
                 .customerWhatsapp(booking.getCustomerInfo().getWhatsapp())
                 .customerComments(booking.getCustomerInfo().getComments())
                 .bookingDate(booking.getTimeSlot().getDate())
                 .bookingTime(booking.getTimeSlot().getTime())
+                .startAt(booking.getStartAt())
+                .endAt(booking.getEndAt())
                 .durationMinutes(booking.getDurationMinutes())
                 .status(booking.getStatus())
                 .paymentStatus(booking.getPaymentStatus())

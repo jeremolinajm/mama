@@ -2,24 +2,29 @@ package com.flavia.dermobeauty.booking.application.usecase;
 
 import com.flavia.dermobeauty.booking.domain.*;
 import com.flavia.dermobeauty.shared.exception.ValidationException;
-import lombok.RequiredArgsConstructor; // <--- IMPORTANTE
-import lombok.extern.slf4j.Slf4j;     // <--- IMPORTANTE
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.util.UUID;
 
 @SuppressWarnings("ClassCanBeRecord")
-@Slf4j // <--- Soluciona el error "Cannot resolve symbol 'log'"
-@RequiredArgsConstructor // <--- Soluciona el error del "bookingRepository" no inicializado
+@Slf4j
+@RequiredArgsConstructor
 public class CreateBookingUseCase {
+
+    private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
 
     private final BookingRepository bookingRepository;
 
     public Booking execute(
             Long serviceId,
+            String serviceName,
             String customerName,
             String customerEmail,
             String customerWhatsapp,
@@ -30,6 +35,15 @@ public class CreateBookingUseCase {
             BigDecimal amount) {
 
         log.info("Creating booking for service {} on {} at {}", serviceId, bookingDate, bookingTime);
+
+        // Validar alineación a slots de 30 minutos
+        if (bookingTime.getMinute() != 0 && bookingTime.getMinute() != 30) {
+            throw new ValidationException("El horario debe ser en intervalos de 30 minutos (:00 o :30)");
+        }
+
+        if (durationMinutes <= 0 || durationMinutes % 30 != 0) {
+            throw new ValidationException("La duración debe ser múltiplo de 30 minutos");
+        }
 
         // Calcular hora de fin
         LocalTime bookingEndTime = bookingTime.plusMinutes(durationMinutes);
@@ -51,12 +65,19 @@ public class CreateBookingUseCase {
 
         TimeSlot timeSlot = new TimeSlot(bookingDate, bookingTime);
 
+        // Crear startAt con timezone
+        OffsetDateTime startAt = LocalDateTime.of(bookingDate, bookingTime)
+                .atZone(ARGENTINA_ZONE)
+                .toOffsetDateTime();
+
         // Crear booking aggregate
         Booking booking = Booking.builder()
                 .bookingNumber(generateBookingNumber())
                 .serviceId(serviceId)
+                .serviceName(serviceName)
                 .customerInfo(customerInfo)
                 .timeSlot(timeSlot)
+                .startAt(startAt)
                 .durationMinutes(durationMinutes)
                 .status(BookingStatus.PENDING)
                 .paymentStatus(PaymentStatus.PENDING)
@@ -72,8 +93,12 @@ public class CreateBookingUseCase {
         return saved;
     }
 
+    /**
+     * Generates a booking number using ULID-like format for uniqueness.
+     * Format: BOOK-{first 8 chars of UUID}
+     */
     private String generateBookingNumber() {
-        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-        return "BOOK-" + timestamp;
+        String uuid = UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase();
+        return "BOOK-" + uuid;
     }
 }

@@ -26,11 +26,12 @@ export default function AdminDashboardPage() {
 
   const loadStats = async () => {
     try {
+      // Usamos size grande para obtener todos los items en el conteo
       const [services, productsPage, bookings, ordersPage] = await Promise.all([
         adminApi.services.getAll(),
-        adminApi.products.getAll(),
+        adminApi.products.getAll(0, 1000),
         adminApi.bookings.getAll(),
-        adminApi.orders.getAll(),
+        adminApi.orders.getAll(0, 1000),
       ]);
 
       // Extract content arrays from paginated responses

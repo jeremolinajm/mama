@@ -2,9 +2,10 @@ package com.flavia.dermobeauty.booking.application.usecase;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.flavia.dermobeauty.booking.domain.Block;
+import com.flavia.dermobeauty.booking.domain.BlockRepository;
 import com.flavia.dermobeauty.booking.domain.Booking;
 import com.flavia.dermobeauty.booking.domain.BookingRepository;
-import com.flavia.dermobeauty.booking.domain.BookingStatus;
 import com.flavia.dermobeauty.catalog.entity.ServiceEntity;
 import com.flavia.dermobeauty.catalog.repository.ServiceRepository;
 import com.flavia.dermobeauty.config.domain.ConfigEntry;
@@ -12,11 +13,11 @@ import com.flavia.dermobeauty.config.repository.ConfigRepository;
 import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
 
-import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.format.TextStyle;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,19 +27,21 @@ import java.util.Locale;
 /**
  * Use Case: Get available time slots for a service on a specific date.
  *
- * Business hours are now database-driven via the "schedule.weekly" config entry.
+ * Business hours are database-driven via the "schedule.weekly" config entry.
  * Returns empty list if the requested day is marked as closed.
+ *
+ * Availability considers:
+ * - Bookings with status IN (PENDING, CONFIRMED) occupy time
+ * - Blocks with status ACTIVE occupy time
+ * - CANCELLED/COMPLETED bookings and CANCELLED blocks do NOT occupy time
+ * - Collisions are GLOBAL (single resource - Flavia), not per-service
  */
+@SuppressWarnings("ClassCanBeRecord")
 @Slf4j
-@Component
 @RequiredArgsConstructor
 public class GetAvailableSlotsUseCase {
 
-    private final BookingRepository bookingRepository;
-    private final ServiceRepository serviceRepository;
-    private final ConfigRepository configRepository;
-    private final ObjectMapper objectMapper;
-
+    private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
     private static final int SLOT_INTERVAL_MINUTES = 30;
     private static final String SCHEDULE_CONFIG_KEY = "schedule.weekly";
 
@@ -46,13 +49,25 @@ public class GetAvailableSlotsUseCase {
     private static final LocalTime FALLBACK_OPEN_TIME = LocalTime.of(9, 0);
     private static final LocalTime FALLBACK_CLOSE_TIME = LocalTime.of(19, 0);
 
+    private final BookingRepository bookingRepository;
+    private final BlockRepository blockRepository;
+    private final ServiceRepository serviceRepository;
+    private final ConfigRepository configRepository;
+    private final ObjectMapper objectMapper;
+
     public List<LocalTime> execute(Long serviceId, LocalDate date) {
         log.debug("Calculating availability for service {} on {}", serviceId, date);
 
-        // 1. Get service duration
+        // 1. Get service duration (for slot sizing)
         ServiceEntity service = serviceRepository.findById(serviceId)
                 .orElseThrow(() -> new ResourceNotFoundException("Service", serviceId));
         int durationMinutes = service.getDurationMinutes();
+
+        // Validate duration is multiple of 30
+        if (durationMinutes <= 0 || durationMinutes % 30 != 0) {
+            log.warn("Service {} has invalid duration {}. Rounding to nearest 30.", serviceId, durationMinutes);
+            durationMinutes = ((durationMinutes + 29) / 30) * 30;
+        }
 
         // 2. Get business hours for the requested day
         BusinessHours businessHours = getBusinessHoursForDate(date);
@@ -63,55 +78,61 @@ public class GetAvailableSlotsUseCase {
             return Collections.emptyList();
         }
 
-        // 4. Get existing bookings for the day
-        List<Booking> existingBookings = bookingRepository.findByDate(date);
+        // 4. Convert day boundaries to OffsetDateTime
+        OffsetDateTime dayStart = date.atTime(businessHours.getOpenTime())
+                .atZone(ARGENTINA_ZONE).toOffsetDateTime();
+        OffsetDateTime dayEnd = date.atTime(businessHours.getCloseTime())
+                .atZone(ARGENTINA_ZONE).toOffsetDateTime();
 
-        // 5. Check if the day is blocked (blocked bookings prevent all other bookings)
-        boolean isDayBlocked = existingBookings.stream()
-                .anyMatch(b -> b.getStatus() == BookingStatus.BLOCKED);
+        // 5. Get all OCCUPYING bookings for the day (PENDING, CONFIRMED only)
+        // Using date range query - includeCancelled=false excludes CANCELLED
+        List<Booking> occupyingBookings = bookingRepository.findByDateRange(dayStart, dayEnd, false)
+                .stream()
+                .filter(Booking::occupiesTime) // PENDING or CONFIRMED
+                .toList();
 
-        if (isDayBlocked) {
-            log.info("Day {} is blocked. No slots available.", date);
+        // 6. Get all ACTIVE blocks for the day
+        List<Block> activeBlocks = blockRepository.findActiveBlocksInRange(dayStart, dayEnd);
+
+        // 7. Check if entire day is blocked
+        if (isDayFullyBlocked(dayStart, dayEnd, activeBlocks)) {
+            log.info("Day {} is fully blocked. No slots available.", date);
             return Collections.emptyList();
         }
 
-        // 6. Calculate available slots
+        // 8. Calculate available slots
         List<LocalTime> availableSlots = new ArrayList<>();
         LocalTime currentSlot = businessHours.getOpenTime();
         LocalTime closeTime = businessHours.getCloseTime();
 
-        // Iterate while the service can fit before closing time
         while (canServiceFit(currentSlot, durationMinutes, closeTime)) {
-            LocalTime endSlot = currentSlot.plusMinutes(durationMinutes);
+            OffsetDateTime slotStart = date.atTime(currentSlot)
+                    .atZone(ARGENTINA_ZONE).toOffsetDateTime();
+            OffsetDateTime slotEnd = slotStart.plusMinutes(durationMinutes);
 
-            if (isSlotFree(currentSlot, endSlot, existingBookings)) {
+            if (isSlotFree(slotStart, slotEnd, occupyingBookings, activeBlocks)) {
                 availableSlots.add(currentSlot);
             }
 
-            // Advance by slot interval
             currentSlot = currentSlot.plusMinutes(SLOT_INTERVAL_MINUTES);
         }
 
-        log.debug("Found {} available slots for {} on {}", availableSlots.size(), serviceId, date);
+        log.debug("Found {} available slots for service {} on {}", availableSlots.size(), serviceId, date);
         return availableSlots;
     }
 
     /**
      * Fetches business hours from database config for the requested date.
-     * Returns fallback hours if config is missing or invalid.
      */
     private BusinessHours getBusinessHoursForDate(LocalDate date) {
         try {
-            // Get day of week (e.g., "monday", "tuesday")
             String dayKey = date.getDayOfWeek()
                     .getDisplayName(TextStyle.FULL, Locale.ENGLISH)
                     .toLowerCase();
 
-            // Fetch schedule config from database
             ConfigEntry scheduleConfig = configRepository.findByKey(SCHEDULE_CONFIG_KEY)
                     .orElseThrow(() -> new RuntimeException("Schedule config not found"));
 
-            // Parse JSON
             JsonNode scheduleJson = objectMapper.readTree(scheduleConfig.getValue());
             JsonNode dayConfig = scheduleJson.get(dayKey);
 
@@ -120,9 +141,7 @@ public class GetAvailableSlotsUseCase {
                 return new BusinessHours(true, FALLBACK_OPEN_TIME, FALLBACK_CLOSE_TIME);
             }
 
-            // Extract day-specific configuration
             boolean enabled = dayConfig.get("enabled").asBoolean();
-
             if (!enabled) {
                 return new BusinessHours(false, null, null);
             }
@@ -143,27 +162,53 @@ public class GetAvailableSlotsUseCase {
     }
 
     private boolean canServiceFit(LocalTime start, int duration, LocalTime closeTime) {
-        // Validación segura de overflow de día
-        if (start.plusMinutes(duration).isBefore(start)) return false; // Pasó medianoche
-        return !start.plusMinutes(duration).isAfter(closeTime);
+        LocalTime end = start.plusMinutes(duration);
+        // Check for midnight overflow
+        if (end.isBefore(start)) return false;
+        return !end.isAfter(closeTime);
     }
 
-    private boolean isSlotFree(LocalTime newStart, LocalTime newEnd, List<Booking> bookings) {
+    /**
+     * Checks if a slot is free (no collisions with bookings or blocks).
+     */
+    private boolean isSlotFree(OffsetDateTime slotStart, OffsetDateTime slotEnd,
+                               List<Booking> bookings, List<Block> blocks) {
+        // Check collision with bookings
         for (Booking b : bookings) {
-            LocalTime bStart = b.getTimeSlot().getTime();
-            LocalTime bEnd = bStart.plusMinutes(b.getDurationMinutes());
+            OffsetDateTime bStart = b.getStartAt();
+            OffsetDateTime bEnd = b.getEndAt();
 
-            // Overlap logic: (StartA < EndB) AND (EndA > StartB)
-            if (newStart.isBefore(bEnd) && newEnd.isAfter(bStart)) {
-                return false; // Collision detected
+            // Overlap: A.start < B.end AND A.end > B.start
+            if (slotStart.isBefore(bEnd) && slotEnd.isAfter(bStart)) {
+                return false;
             }
         }
+
+        // Check collision with blocks
+        for (Block bl : blocks) {
+            OffsetDateTime blStart = bl.getStartAt();
+            OffsetDateTime blEnd = bl.getEndAt();
+
+            if (slotStart.isBefore(blEnd) && slotEnd.isAfter(blStart)) {
+                return false;
+            }
+        }
+
         return true;
     }
 
     /**
-     * Inner class to hold business hours for a specific day.
+     * Checks if the entire business day is covered by a single block.
      */
+    private boolean isDayFullyBlocked(OffsetDateTime dayStart, OffsetDateTime dayEnd, List<Block> blocks) {
+        for (Block bl : blocks) {
+            if (bl.getStartAt().compareTo(dayStart) <= 0 && bl.getEndAt().compareTo(dayEnd) >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static class BusinessHours {
         private final boolean enabled;
         private final LocalTime openTime;
@@ -175,16 +220,8 @@ public class GetAvailableSlotsUseCase {
             this.closeTime = closeTime;
         }
 
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public LocalTime getOpenTime() {
-            return openTime;
-        }
-
-        public LocalTime getCloseTime() {
-            return closeTime;
-        }
+        public boolean isEnabled() { return enabled; }
+        public LocalTime getOpenTime() { return openTime; }
+        public LocalTime getCloseTime() { return closeTime; }
     }
 }

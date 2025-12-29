@@ -28,12 +28,17 @@ export default function ImageUploader({ currentImageUrl, onImageUploaded }: Imag
 
     try {
       setUploading(true);
-      // Previsualización inmediata
+      // Previsualización inmediata con blob local
       const objectUrl = URL.createObjectURL(file);
       setPreview(objectUrl);
 
       // Subida real
       const url = await uploadApi.uploadImage(file);
+
+      // Actualizar preview con la URL del servidor y liberar el blob
+      URL.revokeObjectURL(objectUrl);
+      setPreview(url);
+
       onImageUploaded(url); // Notificar al padre la URL final del servidor
     } catch (error) {
       console.error('Error uploading image:', error);

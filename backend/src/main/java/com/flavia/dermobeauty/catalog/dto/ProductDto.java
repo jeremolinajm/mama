@@ -37,6 +37,8 @@ public class ProductDto {
     @DecimalMin(value = "0.0", inclusive = false, message = "Price must be greater than 0")
     private BigDecimal price;
 
+    private BigDecimal offerPrice;
+
     @NotNull(message = "Stock is required")
     @Min(value = 0, message = "Stock cannot be negative")
     private Integer stock;
@@ -64,6 +66,7 @@ public class ProductDto {
                 .description(entity.getDescription())
                 .shortDescription(entity.getShortDescription())
                 .price(entity.getPrice())
+                .offerPrice(entity.getOfferPrice())
                 .stock(entity.getStock())
                 .categoryId(entity.getCategory().getId())
                 .categoryName(entity.getCategory().getName())

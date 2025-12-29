@@ -7,6 +7,8 @@ import lombok.Getter;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 
 /**
  * Booking Aggregate Root.
@@ -17,11 +19,15 @@ import java.time.LocalDateTime;
 @Builder
 public class Booking {
 
+    private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
+
     private Long id;
     private String bookingNumber;
     private Long serviceId;
+    private String serviceName;  // Snapshot inmutable del nombre del servicio
     private CustomerInfo customerInfo;
-    private TimeSlot timeSlot;
+    private TimeSlot timeSlot;  // Legacy - kept for compatibility
+    private OffsetDateTime startAt;  // New datetime with timezone
     private Integer durationMinutes;
     private BookingStatus status;
     private PaymentStatus paymentStatus;
@@ -32,6 +38,25 @@ public class Booking {
     private LocalDateTime updatedAt;
     private LocalDateTime confirmedAt;
     private LocalDateTime cancelledAt;
+
+    /**
+     * Computed end time based on startAt + durationMinutes.
+     * This is NOT persisted in DB to avoid inconsistencies.
+     */
+    public OffsetDateTime getEndAt() {
+        if (startAt == null || durationMinutes == null) {
+            return null;
+        }
+        return startAt.plusMinutes(durationMinutes);
+    }
+
+    /**
+     * Checks if this booking occupies time slots (used in collision detection).
+     * Only PENDING and CONFIRMED bookings occupy time.
+     */
+    public boolean occupiesTime() {
+        return status == BookingStatus.PENDING || status == BookingStatus.CONFIRMED;
+    }
 
     /**
      * Confirms payment for this booking.
@@ -110,8 +135,7 @@ public class Booking {
      * Reschedules this booking to a new date and time.
      * Business rule: cannot reschedule cancelled or completed bookings.
      *
-     * @param newDate the new booking date
-     * @param newTime the new booking time
+     * @param newTimeSlot the new time slot (legacy)
      */
     public void reschedule(TimeSlot newTimeSlot) {
         if (this.status == BookingStatus.CANCELLED) {
@@ -127,6 +151,53 @@ public class Booking {
         }
 
         this.timeSlot = newTimeSlot;
+        this.updatedAt = LocalDateTime.now();
+    }
+
+    /**
+     * Reschedules this booking to a new start time.
+     * Business rule: cannot reschedule cancelled or completed bookings.
+     * Start time must be aligned to 30-minute intervals.
+     *
+     * @param newStartAt the new start time
+     */
+    public void reschedule(OffsetDateTime newStartAt) {
+        if (this.status == BookingStatus.CANCELLED) {
+            throw new DomainException("Cannot reschedule cancelled booking " + bookingNumber);
+        }
+
+        if (this.status == BookingStatus.COMPLETED) {
+            throw new DomainException("Cannot reschedule completed booking " + bookingNumber);
+        }
+
+        if (newStartAt == null) {
+            throw new IllegalArgumentException("New start time cannot be null");
+        }
+
+        int minute = newStartAt.getMinute();
+        if (minute != 0 && minute != 30) {
+            throw new DomainException("Start time must be aligned to 30-minute intervals (:00 or :30)");
+        }
+
+        this.startAt = newStartAt;
+        // Also update legacy timeSlot for compatibility
+        if (this.timeSlot != null) {
+            this.timeSlot = new TimeSlot(
+                    newStartAt.toLocalDate(),
+                    newStartAt.toLocalTime()
+            );
+        }
+        this.updatedAt = LocalDateTime.now();
+    }
+
+    /**
+     * Updates customer information.
+     */
+    public void updateCustomer(CustomerInfo newCustomerInfo) {
+        if (newCustomerInfo == null) {
+            throw new IllegalArgumentException("Customer info cannot be null");
+        }
+        this.customerInfo = newCustomerInfo;
         this.updatedAt = LocalDateTime.now();
     }
 }

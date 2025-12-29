@@ -4,6 +4,7 @@ import { useCart } from '../context/CartContext';
 import { pedidosApi } from '../api/pedidos';
 import { DeliveryType } from '../types/domain';
 import type { CreateOrderRequest } from '../types/domain';
+import { resolveImageUrl } from '../utils/imageUtils';
 
 // Costo de envío fijo (Debería venir del backend, pero lo dejamos visual por ahora)
 const DELIVERY_COST = 1500; 
@@ -86,8 +87,8 @@ export default function CarritoPage() {
       <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4">
         <div className="bg-white p-12 rounded-3xl text-center max-w-md shadow-soft">
           <div className="w-20 h-20 bg-accent/10 rounded-full flex items-center justify-center mx-auto mb-6 text-accent">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-10 h-10">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 10.5V6a3.75 3.75 0 10-7.5 0v4.5m11.356-1.993l1.263 5c.07.286-.06.591-.292.684l-1.428.571M12 18.75a6 6 0 006-6M12 18.75a6 6 0 01-6-6m0 0V6m0 0A2.25 2.25 0 0113.5 2.25H15" />
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-10 h-10">
+              <circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/>
             </svg>
           </div>
           <h2 className="font-serif text-2xl font-bold text-primary mb-2">Tu carrito está vacío</h2>
@@ -115,16 +116,26 @@ export default function CarritoPage() {
                 {items.map((item) => (
                   <div key={item.product.id} className="flex gap-4 items-center">
                     <div className="w-20 h-20 bg-gray-50 rounded-xl overflow-hidden flex-shrink-0">
-                      <img 
-                        src={item.product.imageUrl || '/placeholder.jpg'} 
-                        alt={item.product.name} 
+                      <img
+                        src={resolveImageUrl(item.product.imageUrl) || '/placeholder.jpg'}
+                        alt={item.product.name}
                         className="w-full h-full object-cover"
                         onError={(e) => (e.currentTarget.src = 'https://placehold.co/100x100')}
                       />
                     </div>
                     <div className="flex-grow">
                       <h4 className="font-sans font-medium text-primary">{item.product.name}</h4>
-                      <p className="text-sm text-gray-500">${item.product.price} x {item.quantity}</p>
+                      <p className="text-sm text-gray-500">
+                        {item.product.isOffer && item.product.offerPrice ? (
+                          <>
+                            <span className="text-accent font-medium">${item.product.offerPrice}</span>
+                            <span className="line-through ml-1">${item.product.price}</span>
+                          </>
+                        ) : (
+                          <span>${item.product.price}</span>
+                        )}
+                        {' '}x {item.quantity}
+                      </p>
                     </div>
                     <div className="flex items-center gap-3">
                       <div className="flex items-center bg-gray-50 rounded-lg">

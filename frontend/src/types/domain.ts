@@ -10,10 +10,34 @@ export const BookingStatus = {
   CONFIRMED: 'CONFIRMED',
   CANCELLED: 'CANCELLED',
   COMPLETED: 'COMPLETED',
-  BLOCKED: 'BLOCKED',
 } as const;
 
 export type BookingStatus = typeof BookingStatus[keyof typeof BookingStatus];
+
+export const BlockStatus = {
+  ACTIVE: 'ACTIVE',
+  CANCELLED: 'CANCELLED',
+} as const;
+
+export type BlockStatus = typeof BlockStatus[keyof typeof BlockStatus];
+
+export const HistoryEventType = {
+  CREATED: 'CREATED',
+  STATUS_CHANGED: 'STATUS_CHANGED',
+  RESCHEDULED: 'RESCHEDULED',
+  CUSTOMER_UPDATED: 'CUSTOMER_UPDATED',
+  PAYMENT_UPDATED: 'PAYMENT_UPDATED',
+} as const;
+
+export type HistoryEventType = typeof HistoryEventType[keyof typeof HistoryEventType];
+
+export const HistoryActor = {
+  ADMIN: 'ADMIN',
+  SYSTEM: 'SYSTEM',
+  CUSTOMER: 'CUSTOMER',
+} as const;
+
+export type HistoryActor = typeof HistoryActor[keyof typeof HistoryActor];
 
 export const PaymentStatus = {
   PENDING: 'PENDING',
@@ -70,6 +94,8 @@ export interface Service {
   shortDescription: string | null;
   durationMinutes: number;
   price: number;
+  offerPrice: number | null;
+  isOffer: boolean;
   categoryId: number | null;
   categoryName: string | null;
   isFeatured: boolean;
@@ -86,6 +112,7 @@ export interface Product {
   description: string;
   shortDescription: string | null;
   price: number;
+  offerPrice: number | null;
   stock: number;
   categoryId: number | null;
   categoryName: string | null;
@@ -289,4 +316,73 @@ export interface DaySchedule {
 
 export interface WeeklySchedule {
   [key: string]: DaySchedule; // monday, tuesday, etc.
+}
+
+// ==================== CALENDAR (Admin) ====================
+
+export interface Block {
+  id: number;
+  blockNumber: string;
+  reason: string;
+  startAt: string; // ISO DateTime
+  endAt: string;   // ISO DateTime
+  status: BlockStatus;
+  createdAt: string;
+  updatedAt: string;
+  cancelledAt: string | null;
+}
+
+// Discriminated union for calendar events
+export interface CalendarBookingEvent {
+  type: 'BOOKING';
+  id: number;
+  startAt: string;   // ISO DateTime
+  endAt: string;     // ISO DateTime (computed)
+  status: BookingStatus;
+  bookingNumber: string;
+  serviceName: string;
+  customerName: string;
+  paymentStatus: PaymentStatus;
+}
+
+export interface CalendarBlockEvent {
+  type: 'BLOCK';
+  id: number;
+  startAt: string;   // ISO DateTime
+  endAt: string;     // ISO DateTime
+  status: BlockStatus;
+  blockNumber: string;
+  reason: string;
+}
+
+export type CalendarEvent = CalendarBookingEvent | CalendarBlockEvent;
+
+// ==================== BOOKING HISTORY ====================
+
+export interface BookingHistoryEntry {
+  id: number;
+  bookingId: number;
+  eventType: HistoryEventType;
+  payload: Record<string, unknown>;
+  actor: HistoryActor;
+  createdAt: string; // ISO DateTime
+}
+
+// ==================== ADMIN REQUESTS ====================
+
+export interface CreateBlockRequest {
+  startAt: string;  // ISO DateTime
+  endAt: string;    // ISO DateTime
+  reason: string;
+}
+
+export interface RescheduleBookingRequest {
+  newStartAt: string; // ISO DateTime
+}
+
+export interface UpdateCustomerRequest {
+  name: string;
+  email: string;
+  whatsapp: string;
+  comments: string | null;
 }

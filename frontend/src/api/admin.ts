@@ -8,6 +8,10 @@ import type {
   ConfigEntry,
   BookingStatus,
   OrderStatus,
+  CalendarEvent,
+  Block,
+  BookingHistoryEntry,
+  ApiResponse,
 } from '../types/domain';
 
 // Spring Page response type
@@ -123,6 +127,59 @@ export const adminApi = {
     },
   },
 
+  // ==================== CALENDAR ====================
+  calendar: {
+    /**
+     * Get calendar events (bookings + blocks) for a date range
+     * @param from Start date (YYYY-MM-DD)
+     * @param to End date (YYYY-MM-DD, inclusive)
+     * @param includeCancelled Include cancelled events (default: false)
+     */
+    getEvents: async (
+      from: string,
+      to: string,
+      includeCancelled: boolean = false
+    ): Promise<CalendarEvent[]> => {
+      const params = new URLSearchParams({
+        from,
+        to,
+        includeCancelled: includeCancelled.toString(),
+      });
+      const response = await apiClient.get<ApiResponse<CalendarEvent[]>>(
+        `/api/admin/calendar?${params.toString()}`
+      );
+      return response.data.data;
+    },
+  },
+
+  // ==================== BLOCKS ====================
+  blocks: {
+    /**
+     * Create a new time block
+     */
+    create: async (request: {
+      startAt: string;
+      endAt: string;
+      reason: string;
+    }): Promise<Block> => {
+      const response = await apiClient.post<ApiResponse<Block>>(
+        '/api/admin/blocks',
+        request
+      );
+      return response.data.data;
+    },
+
+    /**
+     * Cancel a block
+     */
+    cancel: async (id: number): Promise<Block> => {
+      const response = await apiClient.patch<ApiResponse<Block>>(
+        `/api/admin/blocks/${id}/cancel`
+      );
+      return response.data.data;
+    },
+  },
+
   // ==================== BOOKINGS ====================
   bookings: {
     getAll: async (filters?: {
@@ -150,28 +207,46 @@ export const adminApi = {
       await apiClient.delete(`/api/admin/bookings/${id}`);
     },
 
-    reschedule: async (
-      id: number,
-      newDate: string,
-      newTime: string
-    ): Promise<Booking> => {
-      const response = await apiClient.patch<Booking>(
+    /**
+     * Reschedule a booking to a new start time
+     * @param id Booking ID
+     * @param newStartAt New start time (ISO DateTime)
+     */
+    reschedule: async (id: number, newStartAt: string): Promise<Booking> => {
+      const response = await apiClient.patch<ApiResponse<Booking>>(
         `/api/admin/bookings/${id}/reschedule`,
-        { bookingDate: newDate, bookingTime: newTime }
+        { newStartAt }
       );
-      return response.data;
+      return response.data.data;
     },
 
-    blockDay: async (date: string, reason?: string): Promise<Booking> => {
-      const response = await apiClient.post<Booking>(
-        '/api/admin/bookings/block-day',
-        { date, reason: reason || 'Día bloqueado' }
+    /**
+     * Update customer information on a booking
+     */
+    updateCustomer: async (
+      id: number,
+      customer: {
+        name: string;
+        email: string;
+        whatsapp: string;
+        comments: string | null;
+      }
+    ): Promise<Booking> => {
+      const response = await apiClient.patch<ApiResponse<Booking>>(
+        `/api/admin/bookings/${id}/customer`,
+        customer
       );
-      return response.data;
+      return response.data.data;
     },
 
-    unblockDay: async (date: string): Promise<void> => {
-      await apiClient.delete(`/api/admin/bookings/unblock-day?date=${date}`);
+    /**
+     * Get booking history (audit trail)
+     */
+    getHistory: async (id: number): Promise<BookingHistoryEntry[]> => {
+      const response = await apiClient.get<ApiResponse<BookingHistoryEntry[]>>(
+        `/api/admin/bookings/${id}/history`
+      );
+      return response.data.data;
     },
   },
 

@@ -63,7 +63,16 @@ export default function ProductDetailPage() {
           <div className="flex flex-col justify-center">
             <span className="text-gray-400 text-sm font-bold uppercase tracking-wider mb-2">{product.categoryName}</span>
             <h1 className="font-serif text-4xl font-bold text-primary mb-4">{product.name}</h1>
-            <div className="text-3xl font-light text-primary mb-6">${product.price}</div>
+            <div className="flex items-baseline gap-3 mb-6">
+              {product.isOffer && product.offerPrice ? (
+                <>
+                  <span className="text-3xl font-bold text-accent">${product.offerPrice}</span>
+                  <span className="text-xl text-gray-400 line-through">${product.price}</span>
+                </>
+              ) : (
+                <span className="text-3xl font-light text-primary">${product.price}</span>
+              )}
+            </div>
             
             <p className="text-gray-600 leading-relaxed mb-8 font-sans">
               {product.description}

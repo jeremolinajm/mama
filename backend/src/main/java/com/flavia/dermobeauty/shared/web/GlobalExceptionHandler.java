@@ -1,11 +1,13 @@
 package com.flavia.dermobeauty.shared.web;
 
+import com.flavia.dermobeauty.shared.exception.ConflictException;
 import com.flavia.dermobeauty.shared.exception.DomainException;
 import com.flavia.dermobeauty.shared.exception.PaymentException;
 import com.flavia.dermobeauty.shared.exception.ResourceNotFoundException;
 import com.flavia.dermobeauty.shared.exception.ValidationException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
@@ -94,6 +96,53 @@ public class GlobalExceptionHandler {
         );
 
         return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(error);
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ErrorResponse> handleConflict(
+            ConflictException ex,
+            HttpServletRequest request) {
+
+        log.warn("Conflict error: {}", ex.getMessage());
+
+        ErrorResponse error = new ErrorResponse(
+                "CONFLICT",
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(error);
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ErrorResponse> handleDataIntegrityViolation(
+            DataIntegrityViolationException ex,
+            HttpServletRequest request) {
+
+        // Check if this is a slot_occupied trigger exception
+        String message = ex.getMostSpecificCause().getMessage();
+        if (message != null && message.contains("slot_occupied")) {
+            log.warn("Slot collision detected by DB trigger: {}", message);
+
+            ErrorResponse error = new ErrorResponse(
+                    "CONFLICT",
+                    "El horario seleccionado ya está ocupado",
+                    request.getRequestURI()
+            );
+
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(error);
+        }
+
+        // For other data integrity violations, log and return generic error
+        log.error("Data integrity violation: {}", ex.getMessage(), ex);
+
+        ErrorResponse error = new ErrorResponse(
+                "DATA_INTEGRITY_ERROR",
+                "Error de integridad de datos",
+                request.getRequestURI()
+        );
+
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(error);
     }
 
     @ExceptionHandler(DomainException.class)

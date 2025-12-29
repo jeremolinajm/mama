@@ -41,6 +41,10 @@ public class ServiceDto {
     @DecimalMin(value = "0.0", inclusive = false, message = "Price must be greater than 0")
     private BigDecimal price;
 
+    private BigDecimal offerPrice;
+
+    private Boolean isOffer;
+
     @NotNull(message = "Category ID is required")
     private Long categoryId;
 
@@ -61,6 +65,8 @@ public class ServiceDto {
                 .shortDescription(entity.getShortDescription())
                 .durationMinutes(entity.getDurationMinutes())
                 .price(entity.getPrice())
+                .offerPrice(entity.getOfferPrice())
+                .isOffer(entity.getIsOffer())
                 .categoryId(entity.getCategory().getId())
                 .categoryName(entity.getCategory().getName())
                 .imageUrl(entity.getImageUrl())

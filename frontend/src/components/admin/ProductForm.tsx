@@ -23,6 +23,7 @@ export default function ProductForm({ product, onSubmit, onCancel }: ProductForm
     description: product?.description || '',
     shortDescription: product?.shortDescription || '',
     price: product?.price || 0,
+    offerPrice: product?.offerPrice || null as number | null,
     stock: product?.stock || 0,
     categoryId: product?.categoryId || null as number | null,
     isFeatured: product?.isFeatured || false,
@@ -182,6 +183,29 @@ export default function ProductForm({ product, onSubmit, onCancel }: ProductForm
           />
         </div>
       </div>
+
+      {/* Precio de Oferta (condicional) */}
+      {formData.isOffer && (
+        <div className="animate-fade-in">
+          <label className="block text-sm font-bold text-gray-700 mb-1">Precio de Oferta</label>
+          <div className="relative">
+            <span className="absolute left-3 top-2 text-gray-500">$</span>
+            <input
+              type="number"
+              value={formData.offerPrice || ''}
+              onChange={(e) => {
+                const val = parseFloat(e.target.value);
+                setFormData({ ...formData, offerPrice: isNaN(val) ? null : val });
+              }}
+              min="0"
+              step="0.01"
+              placeholder="Precio con descuento"
+              className="w-full px-4 py-2 pl-8 border border-orange-200 bg-orange-50 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-200 focus:border-orange-400"
+            />
+          </div>
+          <p className="text-xs text-orange-600 mt-1">Este precio se mostrará como oferta en lugar del precio normal</p>
+        </div>
+      )}
 
       {/* Categoría - AQUÍ ESTABA EL PROBLEMA */}
       <div>

@@ -1,6 +1,5 @@
 package com.flavia.dermobeauty.sales.web;
 
-import com.flavia.dermobeauty.booking.application.usecase.BlockScheduleUseCase;
 import com.flavia.dermobeauty.booking.application.usecase.CancelBookingUseCase;
 import com.flavia.dermobeauty.booking.application.usecase.ListBookingsUseCase;
 import com.flavia.dermobeauty.booking.application.usecase.RescheduleBookingUseCase;
@@ -21,6 +20,9 @@ import org.springframework.data.domain.Sort;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -29,10 +31,11 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class AdminOperationsController {
 
+    private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
+
     private final ListBookingsUseCase listBookingsUseCase;
     private final CancelBookingUseCase cancelBookingUseCase;
     private final RescheduleBookingUseCase rescheduleBookingUseCase;
-    private final BlockScheduleUseCase blockScheduleUseCase;
     private final ListOrdersUseCase listOrdersUseCase;
     private final UpdateOrderStatusUseCase updateOrderStatusUseCase;
 
@@ -56,29 +59,13 @@ public class AdminOperationsController {
     public ResponseEntity<ApiResponse<BookingResponse>> rescheduleBooking(
             @PathVariable Long id,
             @RequestBody RescheduleRequest request) {
-        Booking updated = rescheduleBookingUseCase.execute(
-                id,
-                request.getBookingDate(),
-                request.getBookingTime()
-        );
+        // Convert LocalDate + LocalTime to OffsetDateTime
+        OffsetDateTime newStartAt = LocalDateTime.of(request.getBookingDate(), request.getBookingTime())
+                .atZone(ARGENTINA_ZONE)
+                .toOffsetDateTime();
+
+        Booking updated = rescheduleBookingUseCase.execute(id, newStartAt);
         return ResponseEntity.ok(ApiResponse.success(BookingResponse.fromDomain(updated)));
-    }
-
-    @PostMapping("/bookings/block-day")
-    public ResponseEntity<ApiResponse<BookingResponse>> blockFullDay(
-            @RequestBody BlockDayRequest request) {
-        Booking blockBooking = blockScheduleUseCase.executeBlockFullDay(
-                request.getDate(),
-                request.getReason()
-        );
-        return ResponseEntity.ok(ApiResponse.success(BookingResponse.fromDomain(blockBooking)));
-    }
-
-    @DeleteMapping("/bookings/unblock-day")
-    public ResponseEntity<ApiResponse<Void>> unblockDay(
-            @RequestParam java.time.LocalDate date) {
-        blockScheduleUseCase.executeUnblockDay(date);
-        return ResponseEntity.ok(ApiResponse.success("Día desbloqueado"));
     }
 
     // ==================== ORDERS ====================
@@ -111,11 +98,5 @@ public class AdminOperationsController {
     public static class RescheduleRequest {
         private java.time.LocalDate bookingDate;
         private java.time.LocalTime bookingTime;
-    }
-
-    @Data
-    public static class BlockDayRequest {
-        private java.time.LocalDate date;
-        private String reason; // Optional reason (e.g., "Holiday - Christmas")
     }
 }

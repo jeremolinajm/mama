@@ -1,133 +1,104 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
 import DayView from './DayView';
-import type { Booking } from '../../../types/domain';
+import type { CalendarEvent, CalendarBookingEvent } from '../../../types/domain';
 
 interface CalendarContainerProps {
   currentDate: Date;
-  bookings: Booking[];
-  onBookingClick?: (booking: Booking) => void;
+  events: CalendarEvent[];
+  onBookingClick?: (event: CalendarBookingEvent) => void;
   onSlotClick?: (time: string) => void;
-  onReschedule?: (bookingId: number, newDate: string, newTime: string) => Promise<void>;
+  onBlockCancel?: (id: number) => Promise<void>;
+  onReschedule?: (bookingId: number, newStartAt: string) => Promise<void>;
 }
 
 /**
  * CalendarContainer - Wrapper component that manages drag-and-drop state
  * and orchestrates interactions between the calendar and backend API.
- *
- * Features:
- * - Manages drag-and-drop state
- * - Handles booking rescheduling with API integration
- * - Provides visual feedback during drag operations
- * - Shows toast notifications for user actions
  */
 export default function CalendarContainer({
   currentDate,
-  bookings,
+  events,
   onBookingClick,
   onSlotClick,
-  onReschedule
+  onBlockCancel,
+  onReschedule,
 }: CalendarContainerProps) {
   const [isDragging, setIsDragging] = useState(false);
-  const [draggingBooking, setDraggingBooking] = useState<Booking | null>(null);
+  const [draggingEvent, setDraggingEvent] = useState<CalendarBookingEvent | null>(null);
 
-  /**
-   * Handle drag start - set dragging state
-   */
-  const handleDragStart = (booking: Booking) => {
+  const handleDragStart = (event: CalendarBookingEvent) => {
     setIsDragging(true);
-    setDraggingBooking(booking);
+    setDraggingEvent(event);
   };
 
-  /**
-   * Handle drag end - clear dragging state
-   */
   const handleDragEnd = () => {
     setIsDragging(false);
-    setDraggingBooking(null);
+    setDraggingEvent(null);
   };
 
-  /**
-   * Handle drop - reschedule booking to new time
-   */
-  const handleDrop = async (bookingId: number, newTime: string) => {
-    if (!draggingBooking) return;
-
-    const newDate = currentDate.toISOString().split('T')[0]; // YYYY-MM-DD format
+  const handleDrop = async (bookingId: number, newStartAt: string) => {
+    if (!draggingEvent) return;
 
     try {
-      // Clear drag state immediately for better UX
       setIsDragging(false);
-      setDraggingBooking(null);
+      setDraggingEvent(null);
 
-      // Show loading toast
       const loadingToast = toast.loading('Reagendando turno...');
 
-      // Call the reschedule handler (which should update backend)
       if (onReschedule) {
-        await onReschedule(bookingId, newDate, newTime);
-      } else {
-        // Mock API call for demonstration
-        await mockUpdateBookingTime(bookingId, newDate, newTime);
+        await onReschedule(bookingId, newStartAt);
       }
 
-      // Success feedback
       toast.success('Turno reagendado exitosamente', {
         id: loadingToast,
-        description: `Nuevo horario: ${newTime}`,
-        duration: 3000
+        duration: 3000,
       });
+    } catch (error: unknown) {
+      console.error('[Calendar] Error rescheduling:', error);
 
-      console.log(`[Calendar] Booking ${bookingId} rescheduled to ${newDate} ${newTime}`);
-
-    } catch (error) {
-      console.error('[Calendar] Error rescheduling booking:', error);
-
-      // Error feedback
-      toast.error('Error al reagendar el turno', {
-        description: 'Por favor intenta nuevamente',
-        duration: 4000
-      });
-
-      // Revert optimistic update (in a real app, you'd reload data)
-      // For now, the parent component should handle data refresh
+      // Check if it's a 409 conflict
+      if (error instanceof Error && error.message.includes('409')) {
+        toast.error('El horario esta ocupado', {
+          description: 'Selecciona otro horario disponible',
+          duration: 4000,
+        });
+      } else {
+        toast.error('Error al reagendar el turno', {
+          description: 'Por favor intenta nuevamente',
+          duration: 4000,
+        });
+      }
     }
   };
 
-  /**
-   * Handle click on empty time slot - trigger new appointment modal
-   */
   const handleSlotClick = (time: string) => {
-    console.log(`[Calendar] Empty slot clicked at ${time}`);
-
     if (onSlotClick) {
       onSlotClick(time);
-    } else {
-      // Show notification if no handler is provided
-      toast.info(`Crear nueva cita a las ${time}`, {
-        description: 'Implementa onSlotClick para abrir el modal de nueva cita',
-        duration: 3000
-      });
     }
   };
 
-  /**
-   * Handle booking card click - open booking details modal
-   */
-  const handleBookingClick = (booking: Booking) => {
-    // Don't trigger click during drag
+  const handleBookingClick = (event: CalendarBookingEvent) => {
     if (isDragging) return;
 
-    console.log(`[Calendar] Booking clicked:`, booking);
-
     if (onBookingClick) {
-      onBookingClick(booking);
-    } else {
-      // Show notification if no handler is provided
-      toast.info(`Ver detalles: ${booking.customerName}`, {
-        description: `Servicio: ${booking.serviceName}`,
-        duration: 3000
-      });
+      onBookingClick(event);
+    }
+  };
+
+  const handleBlockCancel = async (id: number) => {
+    if (!onBlockCancel) return;
+
+    const confirmed = window.confirm('¿Cancelar este bloqueo?');
+    if (!confirmed) return;
+
+    try {
+      const loadingToast = toast.loading('Cancelando bloqueo...');
+      await onBlockCancel(id);
+      toast.success('Bloqueo cancelado', { id: loadingToast });
+    } catch (error) {
+      console.error('[Calendar] Error canceling block:', error);
+      toast.error('Error al cancelar el bloqueo');
     }
   };
 
@@ -135,17 +106,18 @@ export default function CalendarContainer({
     <div className="relative">
       <DayView
         currentDate={currentDate}
-        bookings={bookings}
+        events={events}
         onBookingClick={handleBookingClick}
         onSlotClick={handleSlotClick}
+        onBlockCancel={handleBlockCancel}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
         onDrop={handleDrop}
         isDragging={isDragging}
-        draggingBooking={draggingBooking}
+        draggingEvent={draggingEvent}
       />
 
-      {/* Keyboard Shortcuts Help (Optional) */}
+      {/* Keyboard Shortcuts Help */}
       {isDragging && (
         <div className="absolute top-4 right-4 bg-white shadow-lg rounded-lg p-3 border border-gray-200 z-50">
           <p className="text-xs text-gray-600">
@@ -156,27 +128,4 @@ export default function CalendarContainer({
       )}
     </div>
   );
-}
-
-/**
- * Mock API function for updating booking time
- * In production, replace this with actual API call
- */
-async function mockUpdateBookingTime(
-  bookingId: number,
-  date: string,
-  time: string
-): Promise<void> {
-  // Simulate network delay
-  await new Promise(resolve => setTimeout(resolve, 800));
-
-  // Simulate occasional errors for testing
-  if (Math.random() < 0.1) {
-    throw new Error('Network error');
-  }
-
-  console.log(`[Mock API] Updated booking ${bookingId} to ${date} ${time}`);
-
-  // In production, replace with:
-  // await adminApi.bookings.updateTime(bookingId, { date, time });
 }

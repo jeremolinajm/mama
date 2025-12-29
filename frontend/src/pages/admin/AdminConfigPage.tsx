@@ -2,12 +2,11 @@ import { useEffect, useState } from 'react';
 import { adminApi } from '../../api/admin';
 import ScheduleEditor from '../../components/admin/ScheduleEditor';
 import { toast } from 'sonner';
-import { 
-  Store, 
-  CalendarClock, 
-  Truck, 
-  LayoutTemplate, 
-  Save, 
+import {
+  Store,
+  CalendarClock,
+  Truck,
+  Save,
   Loader2,
   Globe,
   Instagram,
@@ -18,8 +17,7 @@ import {
 } from 'lucide-react';
 
 // Definimos las secciones de configuración
-// Eliminamos 'contact' porque la unificamos con 'general'
-type SettingsTab = 'general' | 'agenda' | 'store' | 'content';
+type SettingsTab = 'general' | 'agenda' | 'store';
 
 // Sub-componente de Botón de Menú Lateral (Corregido y Accesible)
 const TabButton = ({ 
@@ -140,13 +138,9 @@ export default function AdminConfigPage() {
             id="agenda" label="Agenda & Turnos" icon={CalendarClock} description="Horarios de atención y políticas." 
             isActive={activeTab === 'agenda'} onClick={() => setActiveTab('agenda')}
           />
-          <TabButton 
-            id="store" label="Tienda & Envíos" icon={Truck} description="Costos de envío y reglas de venta." 
+          <TabButton
+            id="store" label="Tienda & Envíos" icon={Truck} description="Costos de envío y reglas de venta."
             isActive={activeTab === 'store'} onClick={() => setActiveTab('store')}
-          />
-          <TabButton 
-            id="content" label="Contenido & Portada" icon={LayoutTemplate} description="Textos del Hero y banners." 
-            isActive={activeTab === 'content'} onClick={() => setActiveTab('content')}
           />
         </div>
 
@@ -160,7 +154,6 @@ export default function AdminConfigPage() {
                 {activeTab === 'general' && 'Información Pública'}
                 {activeTab === 'agenda' && 'Reglas de Agenda'}
                 {activeTab === 'store' && 'Configuración E-commerce'}
-                {activeTab === 'content' && 'Gestión de Contenidos'}
               </h2>
               <button 
                 onClick={handleSave}
@@ -346,43 +339,6 @@ export default function AdminConfigPage() {
                 </div>
               )}
 
-              {/* --- TAB: CONTENT --- */}
-              {activeTab === 'content' && (
-                <div className="space-y-6 animate-fade-in">
-                  <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
-                    <h4 className="font-bold text-gray-900 mb-4">Sección Principal (Hero Home)</h4>
-                    
-                    <div className="space-y-4">
-                      <InputGroup label="Título Principal">
-                        <input 
-                          type="text" 
-                          value={values['hero.title'] || ''}
-                          onChange={e => handleChange('hero.title', e.target.value)}
-                          className="form-input font-serif text-lg" 
-                        />
-                      </InputGroup>
-                      
-                      <InputGroup label="Subtítulo">
-                        <textarea 
-                          value={values['hero.subtitle'] || ''}
-                          onChange={e => handleChange('hero.subtitle', e.target.value)}
-                          className="form-textarea"
-                          rows={2}
-                        />
-                      </InputGroup>
-
-                      <InputGroup label="Texto Botón CTA">
-                        <input 
-                          type="text" 
-                          value={values['hero.cta_text'] || 'Reservar Turno'}
-                          onChange={e => handleChange('hero.cta_text', e.target.value)}
-                          className="form-input w-1/2" 
-                        />
-                      </InputGroup>
-                    </div>
-                  </div>
-                </div>
-              )}
 
             </div>
           </div>

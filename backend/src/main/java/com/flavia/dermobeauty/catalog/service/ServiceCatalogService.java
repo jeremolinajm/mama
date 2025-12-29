@@ -93,6 +93,8 @@ public class ServiceCatalogService {
                 .shortDescription(dto.getShortDescription())
                 .durationMinutes(dto.getDurationMinutes())
                 .price(dto.getPrice())
+                .offerPrice(dto.getOfferPrice())
+                .isOffer(dto.getIsOffer() != null ? dto.getIsOffer() : false)
                 .category(category)
                 .imageUrl(dto.getImageUrl())
                 .isFeatured(dto.getIsFeatured() != null ? dto.getIsFeatured() : false)
@@ -121,6 +123,8 @@ public class ServiceCatalogService {
         entity.setShortDescription(dto.getShortDescription());
         entity.setDurationMinutes(dto.getDurationMinutes());
         entity.setPrice(dto.getPrice());
+        entity.setOfferPrice(dto.getOfferPrice());
+        entity.setIsOffer(dto.getIsOffer());
         entity.setImageUrl(dto.getImageUrl());
         entity.setIsFeatured(dto.getIsFeatured());
         entity.setIsActive(dto.getIsActive());

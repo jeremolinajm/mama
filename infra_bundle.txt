@@ -32,6 +32,27 @@ services:
     networks:
       - dermobeauty-network
 
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: dermobeauty-backend
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/dermobeauty_dev
+      SPRING_DATASOURCE_USERNAME: dermobeauty
+      SPRING_DATASOURCE_PASSWORD: dermobeauty
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../backend/uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - dermobeauty-network
+
 volumes:
   postgres_data:
 

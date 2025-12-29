@@ -123,7 +123,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const itemCount = state.items.reduce((total, item) => total + item.quantity, 0);
 
   const subtotal = state.items.reduce(
-    (total, item) => total + item.product.price * item.quantity,
+    (total, item) => {
+      const effectivePrice = item.product.isOffer && item.product.offerPrice
+        ? item.product.offerPrice
+        : item.product.price;
+      return total + effectivePrice * item.quantity;
+    },
     0
   );
 

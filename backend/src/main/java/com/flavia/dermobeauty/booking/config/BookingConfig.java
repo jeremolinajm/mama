@@ -3,6 +3,7 @@ package com.flavia.dermobeauty.booking.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.flavia.dermobeauty.booking.application.port.NotificationService;
 import com.flavia.dermobeauty.booking.application.usecase.*;
+import com.flavia.dermobeauty.booking.domain.BlockRepository;
 import com.flavia.dermobeauty.booking.domain.BookingRepository;
 import com.flavia.dermobeauty.catalog.repository.ServiceRepository;
 import com.flavia.dermobeauty.config.repository.ConfigRepository;
@@ -46,15 +47,51 @@ public class BookingConfig {
     @Bean
     public GetAvailableSlotsUseCase getAvailableSlotsUseCase(
             BookingRepository bookingRepository,
+            BlockRepository blockRepository,
             ServiceRepository serviceRepository,
             ConfigRepository configRepository,
             ObjectMapper objectMapper
     ) {
         return new GetAvailableSlotsUseCase(
                 bookingRepository,
+                blockRepository,
                 serviceRepository,
                 configRepository,
                 objectMapper
         );
+    }
+
+    @Bean
+    public GetCalendarEventsUseCase getCalendarEventsUseCase(
+            BookingRepository bookingRepository,
+            BlockRepository blockRepository
+    ) {
+        return new GetCalendarEventsUseCase(bookingRepository, blockRepository);
+    }
+
+    @Bean
+    public CreateBlockUseCase createBlockUseCase(
+            BlockRepository blockRepository,
+            BookingRepository bookingRepository
+    ) {
+        return new CreateBlockUseCase(blockRepository, bookingRepository);
+    }
+
+    @Bean
+    public CancelBlockUseCase cancelBlockUseCase(BlockRepository blockRepository) {
+        return new CancelBlockUseCase(blockRepository);
+    }
+
+    @Bean
+    public RescheduleBookingUseCase rescheduleBookingUseCase(
+            BookingRepository bookingRepository,
+            BlockRepository blockRepository
+    ) {
+        return new RescheduleBookingUseCase(bookingRepository, blockRepository);
+    }
+
+    @Bean
+    public UpdateBookingCustomerUseCase updateBookingCustomerUseCase(BookingRepository bookingRepository) {
+        return new UpdateBookingCustomerUseCase(bookingRepository);
     }
 }

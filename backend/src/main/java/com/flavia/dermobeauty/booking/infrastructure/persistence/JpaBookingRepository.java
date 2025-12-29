@@ -8,6 +8,7 @@ import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -43,5 +44,23 @@ public interface JpaBookingRepository extends JpaRepository<BookingEntity, Long>
             @Param("date") LocalDate date,
             @Param("startTime") LocalTime startTime,
             @Param("endTime") LocalTime endTime
+    );
+
+    /**
+     * Find bookings in date range, excluding cancelled.
+     */
+    @Query("SELECT b FROM BookingEntity b WHERE b.startAt >= :from AND b.startAt <= :to AND b.status != 'CANCELLED' ORDER BY b.startAt")
+    List<BookingEntity> findByDateRangeExcludingCancelled(
+            @Param("from") OffsetDateTime from,
+            @Param("to") OffsetDateTime to
+    );
+
+    /**
+     * Find all bookings in date range, including cancelled.
+     */
+    @Query("SELECT b FROM BookingEntity b WHERE b.startAt >= :from AND b.startAt <= :to ORDER BY b.startAt")
+    List<BookingEntity> findByDateRangeAll(
+            @Param("from") OffsetDateTime from,
+            @Param("to") OffsetDateTime to
     );
 }

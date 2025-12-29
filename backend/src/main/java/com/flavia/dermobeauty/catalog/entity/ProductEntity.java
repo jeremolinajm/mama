@@ -39,6 +39,9 @@ public class ProductEntity {
     @Column(nullable = false, precision = 10, scale = 2)
     private BigDecimal price;
 
+    @Column(name = "offer_price", precision = 10, scale = 2)
+    private BigDecimal offerPrice;
+
     @Builder.Default
     @Column(nullable = false)
     private Integer stock = 0;

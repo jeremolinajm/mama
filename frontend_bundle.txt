@@ -11,6 +11,18 @@ import type {
   OrderStatus,
 } from '../types/domain';
 
+// Spring Page response type
+export interface PageResponse<T> {
+  content: T[];
+  totalElements: number;
+  totalPages: number;
+  size: number;
+  number: number; // current page number (0-indexed)
+  first: boolean;
+  last: boolean;
+  empty: boolean;
+}
+
 /**
  * API module for admin operations
  * All endpoints require JWT authentication
@@ -51,8 +63,10 @@ export const adminApi = {
 
   // ==================== PRODUCTS ====================
   products: {
-    getAll: async (): Promise<Product[]> => {
-      const response = await apiClient.get<Product[]>('/api/admin/products');
+    getAll: async (page: number = 0, size: number = 10): Promise<PageResponse<Product>> => {
+      const response = await apiClient.get<PageResponse<Product>>(
+        `/api/admin/products?page=${page}&size=${size}`
+      );
       return response.data;
     },
 
@@ -136,21 +150,47 @@ export const adminApi = {
     cancel: async (id: number): Promise<void> => {
       await apiClient.delete(`/api/admin/bookings/${id}`);
     },
+
+    reschedule: async (
+      id: number,
+      newDate: string,
+      newTime: string
+    ): Promise<Booking> => {
+      const response = await apiClient.patch<Booking>(
+        `/api/admin/bookings/${id}/reschedule`,
+        { bookingDate: newDate, bookingTime: newTime }
+      );
+      return response.data;
+    },
+
+    blockDay: async (date: string, reason?: string): Promise<Booking> => {
+      const response = await apiClient.post<Booking>(
+        '/api/admin/bookings/block-day',
+        { date, reason: reason || 'Día bloqueado' }
+      );
+      return response.data;
+    },
+
+    unblockDay: async (date: string): Promise<void> => {
+      await apiClient.delete(`/api/admin/bookings/unblock-day?date=${date}`);
+    },
   },
 
   // ==================== ORDERS ====================
   orders: {
-    getAll: async (filters?: {
+    getAll: async (page: number = 0, size: number = 10, filters?: {
       startDate?: string;
       endDate?: string;
       status?: OrderStatus;
-    }): Promise<Order[]> => {
+    }): Promise<PageResponse<Order>> => {
       const params = new URLSearchParams();
+      params.append('page', page.toString());
+      params.append('size', size.toString());
       if (filters?.startDate) params.append('startDate', filters.startDate);
       if (filters?.endDate) params.append('endDate', filters.endDate);
       if (filters?.status) params.append('status', filters.status);
 
-      const response = await apiClient.get<Order[]>(`/api/admin/orders?${params.toString()}`);
+      const response = await apiClient.get<PageResponse<Order>>(`/api/admin/orders?${params.toString()}`);
       return response.data;
     },
 
@@ -470,25 +510,23 @@ import apiClient from './client';
  * API module for file uploads
  */
 
-interface UploadResponse {
-  url: string;
-}
-
 export const uploadApi = {
   /**
    * Upload an image file
+   * Backend returns the URL string directly after ApiResponse unwrapping
    */
   uploadImage: async (file: File): Promise<string> => {
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await apiClient.post<UploadResponse>('/api/admin/uploads', formData, {
+    const response = await apiClient.post<string>('/api/admin/uploads', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
       },
     });
 
-    return response.data.url;
+    // El backend devuelve el string URL directamente (ej: "/api/uploads/uuid.jpg")
+    return response.data;
   },
 };
 
@@ -519,7 +557,8 @@ import AdminServiciosPage from './pages/admin/AdminServiciosPage';
 import AdminProductosPage from './pages/admin/AdminProductosPage';
 import AdminTurnosPage from './pages/admin/AdminTurnosPage';
 import AdminPedidosPage from './pages/admin/AdminPedidosPage';
-import AdminConfigPage from './pages/admin/AdminConfigPage'; 
+import AdminConfigPage from './pages/admin/AdminConfigPage';
+import AdminCategoriasPage from './pages/admin/AdminCategoriasPage';
 import PaymentFailurePage from './pages/PaymentFailurePage';
 import PaymentSuccessPage from './pages/PaymentSuccessPage';
 
@@ -562,6 +601,7 @@ function App() {
               <Route path="productos" element={<AdminProductosPage />} />
               <Route path="turnos" element={<AdminTurnosPage />} />
               <Route path="pedidos" element={<AdminPedidosPage />} />
+              <Route path="categorias" element={<AdminCategoriasPage />} />
               <Route path="config" element={<AdminConfigPage />} />
             </Route>
           </Routes>
@@ -574,75 +614,540 @@ function App() {
 export default App;
 
 
+========== FILE: ./components/admin/calendar/CalendarContainer.tsx ==========
+import { useState } from 'react';
+import { toast } from 'sonner';
+import DayView from './DayView';
+import type { Booking } from '../../../types/domain';
+
+interface CalendarContainerProps {
+  currentDate: Date;
+  bookings: Booking[];
+  onBookingClick?: (booking: Booking) => void;
+  onSlotClick?: (time: string) => void;
+  onReschedule?: (bookingId: number, newDate: string, newTime: string) => Promise<void>;
+}
+
+/**
+ * CalendarContainer - Wrapper component that manages drag-and-drop state
+ * and orchestrates interactions between the calendar and backend API.
+ *
+ * Features:
+ * - Manages drag-and-drop state
+ * - Handles booking rescheduling with API integration
+ * - Provides visual feedback during drag operations
+ * - Shows toast notifications for user actions
+ */
+export default function CalendarContainer({
+  currentDate,
+  bookings,
+  onBookingClick,
+  onSlotClick,
+  onReschedule
+}: CalendarContainerProps) {
+  const [isDragging, setIsDragging] = useState(false);
+  const [draggingBooking, setDraggingBooking] = useState<Booking | null>(null);
+
+  /**
+   * Handle drag start - set dragging state
+   */
+  const handleDragStart = (booking: Booking) => {
+    setIsDragging(true);
+    setDraggingBooking(booking);
+  };
+
+  /**
+   * Handle drag end - clear dragging state
+   */
+  const handleDragEnd = () => {
+    setIsDragging(false);
+    setDraggingBooking(null);
+  };
+
+  /**
+   * Handle drop - reschedule booking to new time
+   */
+  const handleDrop = async (bookingId: number, newTime: string) => {
+    if (!draggingBooking) return;
+
+    const newDate = currentDate.toISOString().split('T')[0]; // YYYY-MM-DD format
+
+    try {
+      // Clear drag state immediately for better UX
+      setIsDragging(false);
+      setDraggingBooking(null);
+
+      // Show loading toast
+      const loadingToast = toast.loading('Reagendando turno...');
+
+      // Call the reschedule handler (which should update backend)
+      if (onReschedule) {
+        await onReschedule(bookingId, newDate, newTime);
+      } else {
+        // Mock API call for demonstration
+        await mockUpdateBookingTime(bookingId, newDate, newTime);
+      }
+
+      // Success feedback
+      toast.success('Turno reagendado exitosamente', {
+        id: loadingToast,
+        description: `Nuevo horario: ${newTime}`,
+        duration: 3000
+      });
+
+      console.log(`[Calendar] Booking ${bookingId} rescheduled to ${newDate} ${newTime}`);
+
+    } catch (error) {
+      console.error('[Calendar] Error rescheduling booking:', error);
+
+      // Error feedback
+      toast.error('Error al reagendar el turno', {
+        description: 'Por favor intenta nuevamente',
+        duration: 4000
+      });
+
+      // Revert optimistic update (in a real app, you'd reload data)
+      // For now, the parent component should handle data refresh
+    }
+  };
+
+  /**
+   * Handle click on empty time slot - trigger new appointment modal
+   */
+  const handleSlotClick = (time: string) => {
+    console.log(`[Calendar] Empty slot clicked at ${time}`);
+
+    if (onSlotClick) {
+      onSlotClick(time);
+    } else {
+      // Show notification if no handler is provided
+      toast.info(`Crear nueva cita a las ${time}`, {
+        description: 'Implementa onSlotClick para abrir el modal de nueva cita',
+        duration: 3000
+      });
+    }
+  };
+
+  /**
+   * Handle booking card click - open booking details modal
+   */
+  const handleBookingClick = (booking: Booking) => {
+    // Don't trigger click during drag
+    if (isDragging) return;
+
+    console.log(`[Calendar] Booking clicked:`, booking);
+
+    if (onBookingClick) {
+      onBookingClick(booking);
+    } else {
+      // Show notification if no handler is provided
+      toast.info(`Ver detalles: ${booking.customerName}`, {
+        description: `Servicio: ${booking.serviceName}`,
+        duration: 3000
+      });
+    }
+  };
+
+  return (
+    <div className="relative">
+      <DayView
+        currentDate={currentDate}
+        bookings={bookings}
+        onBookingClick={handleBookingClick}
+        onSlotClick={handleSlotClick}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+        onDrop={handleDrop}
+        isDragging={isDragging}
+        draggingBooking={draggingBooking}
+      />
+
+      {/* Keyboard Shortcuts Help (Optional) */}
+      {isDragging && (
+        <div className="absolute top-4 right-4 bg-white shadow-lg rounded-lg p-3 border border-gray-200 z-50">
+          <p className="text-xs text-gray-600">
+            <kbd className="px-2 py-1 bg-gray-100 rounded text-[10px] mr-1">ESC</kbd>
+            Cancelar
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Mock API function for updating booking time
+ * In production, replace this with actual API call
+ */
+async function mockUpdateBookingTime(
+  bookingId: number,
+  date: string,
+  time: string
+): Promise<void> {
+  // Simulate network delay
+  await new Promise(resolve => setTimeout(resolve, 800));
+
+  // Simulate occasional errors for testing
+  if (Math.random() < 0.1) {
+    throw new Error('Network error');
+  }
+
+  console.log(`[Mock API] Updated booking ${bookingId} to ${date} ${time}`);
+
+  // In production, replace with:
+  // await adminApi.bookings.updateTime(bookingId, { date, time });
+}
+
+
 ========== FILE: ./components/admin/calendar/DayView.tsx ==========
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
-import type { Booking } from '../../../types/domain';
+import { useEffect, useState } from 'react';
+import { DollarSign, MessageCircle } from 'lucide-react';
+import type { Booking, BookingStatus, PaymentStatus } from '../../../types/domain';
 
 interface DayViewProps {
   currentDate: Date;
   bookings: Booking[];
+  onBookingClick?: (booking: Booking) => void;
+  onSlotClick?: (time: string) => void;
+  onDragStart?: (booking: Booking) => void;
+  onDragEnd?: () => void;
+  onDrop?: (bookingId: number, newTime: string) => void;
+  isDragging?: boolean;
+  draggingBooking?: Booking | null;
 }
 
-export default function DayView({ currentDate, bookings }: DayViewProps) {
-  // Generar horas de 8 a 20
-  const hours = Array.from({ length: 13 }, (_, i) => i + 8);
-  
-  // Filtrar turnos del día
+const HOUR_HEIGHT_PX = 66; // Height of each hour in pixels
+const START_HOUR = 8;
+const END_HOUR = 20;
+
+export default function DayView({
+  currentDate,
+  bookings,
+  onBookingClick,
+  onSlotClick,
+  onDragStart,
+  onDragEnd,
+  onDrop,
+  isDragging = false,
+  draggingBooking = null
+}: DayViewProps) {
+  const [currentTime, setCurrentTime] = useState(new Date());
+
+  // Update current time every minute
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 60000); // Update every minute
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Generate hours array
+  const hours = Array.from({ length: END_HOUR - START_HOUR + 1 }, (_, i) => i + START_HOUR);
+
+  // Filter bookings for the current day
   const dayBookings = bookings.filter(b => b.bookingDate === format(currentDate, 'yyyy-MM-dd'));
 
+  // Calculate current time indicator position
+  const getCurrentTimePosition = (): number | null => {
+    const isToday = format(currentDate, 'yyyy-MM-dd') === format(currentTime, 'yyyy-MM-dd');
+    if (!isToday) return null;
+
+    const hours = currentTime.getHours();
+    const minutes = currentTime.getMinutes();
+
+    if (hours < START_HOUR || hours > END_HOUR) return null;
+
+    return (hours - START_HOUR) * HOUR_HEIGHT_PX + (minutes / 60) * HOUR_HEIGHT_PX;
+  };
+
+  const currentTimePosition = getCurrentTimePosition();
+
+  // Get semantic color classes based on booking status
+  const getBookingColorClasses = (status: BookingStatus, paymentStatus: PaymentStatus): string => {
+    if (status === 'BLOCKED') {
+      return 'bg-gray-100 border-l-gray-400 diagonal-stripes cursor-not-allowed';
+    }
+
+    if (status === 'CONFIRMED' || paymentStatus === 'PAID') {
+      return 'bg-emerald-50 border-l-emerald-500 hover:bg-emerald-100';
+    }
+
+    if (status === 'PENDING' || paymentStatus === 'PENDING') {
+      return 'bg-amber-50 border-l-amber-500 hover:bg-amber-100';
+    }
+
+    if (status === 'CANCELLED') {
+      return 'bg-red-50 border-l-red-400 hover:bg-red-100 opacity-60';
+    }
+
+    return 'bg-blue-50 border-l-blue-500 hover:bg-blue-100';
+  };
+
+  // Calculate position from time
+  const timeToPosition = (time: string): number => {
+    const [h, m] = time.split(':').map(Number);
+    return (h - START_HOUR) * HOUR_HEIGHT_PX + (m / 60) * HOUR_HEIGHT_PX;
+  };
+
+  // Calculate time from Y position
+  const positionToTime = (yPosition: number): string => {
+    const totalMinutes = (yPosition / HOUR_HEIGHT_PX) * 60;
+    const hours = Math.floor(totalMinutes / 60) + START_HOUR;
+    const minutes = Math.round((totalMinutes % 60) / 30) * 30; // Snap to 30-minute intervals
+
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+  };
+
+  // Check if a time slot has a collision with existing bookings
+  const hasCollision = (time: string, duration: number, excludeId?: number): boolean => {
+    const newStart = timeToPosition(time);
+    const newEnd = newStart + (duration / 60) * HOUR_HEIGHT_PX;
+
+    return dayBookings.some(booking => {
+      if (excludeId && booking.id === excludeId) return false;
+
+      const bookingStart = timeToPosition(booking.bookingTime);
+      const bookingEnd = bookingStart + (booking.durationMinutes / 60) * HOUR_HEIGHT_PX;
+
+      // Check for overlap
+      return newStart < bookingEnd && newEnd > bookingStart;
+    });
+  };
+
+  // Handle click on empty slot
+  const handleSlotClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!onSlotClick) return;
+    if (e.target !== e.currentTarget) return; // Only trigger on background clicks
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const yPosition = e.clientY - rect.top;
+    const time = positionToTime(yPosition);
+
+    onSlotClick(time);
+  };
+
+  // Handle drag over
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  // Handle drop
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if (!draggingBooking || !onDrop) return;
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const yPosition = e.clientY - rect.top;
+    const newTime = positionToTime(yPosition);
+
+    // Check for collisions
+    if (hasCollision(newTime, draggingBooking.durationMinutes, draggingBooking.id)) {
+      alert('No se puede mover aquí - conflicto con otra reserva');
+      return;
+    }
+
+    onDrop(draggingBooking.id, newTime);
+  };
+
   return (
-    <div className="bg-white rounded-3xl shadow-soft overflow-hidden border border-gray-100 flex flex-col h-[600px]">
-      <div className="p-4 border-b border-gray-100 bg-gray-50 flex justify-between items-center">
-         <h3 className="font-serif font-bold text-lg capitalize text-primary">
-            {format(currentDate, 'EEEE d, MMMM', { locale: es })}
-         </h3>
-         <span className="text-sm text-gray-500">{dayBookings.length} turnos agendados</span>
+    <div className="bg-white rounded-3xl shadow-soft overflow-hidden border border-gray-100 flex flex-col h-[700px]">
+      {/* Header */}
+      <div className="p-4 border-b border-gray-200 bg-gradient-to-r from-gray-50 to-white flex justify-between items-center">
+        <h3 className="font-serif font-bold text-lg capitalize text-primary">
+          {format(currentDate, 'EEEE d, MMMM', { locale: es })}
+        </h3>
+        <span className="text-sm text-gray-500 bg-white px-3 py-1 rounded-full border border-gray-200">
+          {dayBookings.length} turnos agendados
+        </span>
       </div>
 
+      {/* Calendar Grid */}
       <div className="flex-1 overflow-y-auto relative">
-        <div className="flex min-h-[800px]">
-          {/* Columna Horas */}
-          <div className="w-16 border-r border-gray-100 bg-gray-50/50 flex-shrink-0">
+        <div className="flex min-h-[900px]">
+          {/* Time Column */}
+          <div className="w-20 border-r border-gray-200 bg-gray-50/80 flex-shrink-0 sticky left-0 z-10">
             {hours.map(hour => (
-              <div key={hour} className="h-[66px] border-b border-gray-100 text-xs text-gray-400 p-2 text-right">
-                {hour}:00
+              <div
+                key={hour}
+                className="h-[66px] border-b border-gray-200 text-sm font-medium text-gray-600 p-3 text-right"
+              >
+                {hour.toString().padStart(2, '0')}:00
               </div>
             ))}
           </div>
 
-          {/* Columna Turnos (Canvas) */}
-          <div className="flex-1 relative bg-[url('/grid-pattern.png')]"> 
-            {/* Líneas guía */}
-            {hours.map(hour => (
-               <div key={`line-${hour}`} className="h-[66px] border-b border-gray-100 w-full absolute" style={{ top: `${(hour - 8) * 66}px` }}></div>
+          {/* Bookings Canvas */}
+          <div
+            className="flex-1 relative bg-white cursor-pointer"
+            onClick={handleSlotClick}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+          >
+            {/* Hour Grid Lines */}
+            {hours.map((hour, index) => (
+              <div
+                key={`line-${hour}`}
+                className={`h-[66px] border-b w-full absolute ${
+                  index % 2 === 0 ? 'border-gray-200' : 'border-gray-100'
+                }`}
+                style={{ top: `${(hour - START_HOUR) * HOUR_HEIGHT_PX}px` }}
+              >
+                {/* Half-hour markers */}
+                <div className="absolute top-1/2 left-0 right-0 border-t border-dashed border-gray-100"></div>
+              </div>
             ))}
 
-            {/* Bloques de Turnos */}
-            {dayBookings.map(booking => {
-               // Calculo simplificado de posición absoluta en pixeles (66px por hora)
-               const [h, m] = booking.bookingTime.split(':').map(Number);
-               const topPx = (h - 8) * 66 + (m / 60) * 66;
-               const heightPx = (booking.durationMinutes / 60) * 66;
+            {/* Current Time Indicator */}
+            {currentTimePosition !== null && (
+              <div
+                className="absolute left-0 right-0 z-20 pointer-events-none"
+                style={{ top: `${currentTimePosition}px` }}
+              >
+                <div className="flex items-center">
+                  <div className="w-3 h-3 bg-red-500 rounded-full -ml-1.5 shadow-lg"></div>
+                  <div className="flex-1 h-0.5 bg-red-500 shadow-sm"></div>
+                </div>
+                <div className="absolute -top-3 left-4 bg-red-500 text-white text-xs px-2 py-0.5 rounded-full shadow-md">
+                  {format(currentTime, 'HH:mm')}
+                </div>
+              </div>
+            )}
 
-               return (
+            {/* Booking Cards */}
+            {dayBookings.map(booking => {
+              const topPx = timeToPosition(booking.bookingTime);
+              const heightPx = (booking.durationMinutes / 60) * HOUR_HEIGHT_PX;
+              const isBeingDragged = isDragging && draggingBooking?.id === booking.id;
+              const isBlocked = booking.status === 'BLOCKED';
+
+              return (
                 <div
                   key={booking.id}
-                  className="absolute left-2 right-2 rounded-xl bg-accent/10 border-l-4 border-accent p-2 hover:bg-accent/20 transition-colors cursor-pointer shadow-sm overflow-hidden"
-                  style={{ top: `${topPx}px`, height: `${heightPx}px` }}
-                  title={`${booking.serviceName} - ${booking.customerName}`}
+                  draggable={!isBlocked}
+                  onDragStart={(e) => {
+                    if (isBlocked) return;
+                    e.dataTransfer.effectAllowed = 'move';
+                    onDragStart?.(booking);
+                  }}
+                  onDragEnd={() => {
+                    if (isBlocked) return;
+                    onDragEnd?.();
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!isBlocked) {
+                      onBookingClick?.(booking);
+                    }
+                  }}
+                  className={`
+                    absolute left-3 right-3 rounded-xl border-l-4 p-3
+                    transition-all duration-200 shadow-md
+                    ${!isBlocked ? 'cursor-move hover:shadow-lg hover:scale-[1.02] active:scale-[0.98]' : 'cursor-not-allowed'}
+                    ${getBookingColorClasses(booking.status, booking.paymentStatus)}
+                    ${isBeingDragged ? 'opacity-50 scale-95' : 'opacity-100'}
+                  `}
+                  style={{
+                    top: `${topPx}px`,
+                    height: `${heightPx}px`,
+                    minHeight: '50px'
+                  }}
                 >
-                  <p className="text-xs font-bold text-primary truncate">{booking.bookingTime.slice(0,5)} - {booking.customerName}</p>
-                  <p className="text-[10px] text-gray-500 truncate">{booking.serviceName}</p>
+                  {/* Card Header */}
+                  <div className="flex items-start justify-between gap-2 mb-1">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-bold text-gray-900 truncate">
+                        {isBlocked ? '🔒 ' : ''}{booking.customerName}
+                      </p>
+                      {!isBlocked && (
+                        <p className="text-xs text-gray-600 truncate">
+                          {booking.bookingTime.slice(0, 5)} - {booking.serviceName}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Action Buttons - Only for non-blocked bookings */}
+                    {!isBlocked && (
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        {booking.paymentStatus === 'PENDING' && (
+                          <div
+                            className="w-6 h-6 rounded-full bg-amber-500 flex items-center justify-center shadow-sm"
+                            title="Pago pendiente"
+                          >
+                            <DollarSign size={14} className="text-white" />
+                          </div>
+                        )}
+
+                        {booking.customerWhatsApp && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              // Remove non-numeric characters
+                              const phone = booking.customerWhatsApp.replace(/\D/g, '');
+                              window.open(`https://wa.me/${phone}`, '_blank');
+                            }}
+                            className="w-6 h-6 rounded-full bg-green-500 hover:bg-green-600 flex items-center justify-center transition-colors shadow-sm"
+                            title="Abrir WhatsApp"
+                          >
+                            <MessageCircle size={14} className="text-white" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Status Badge */}
+                  {heightPx > 60 && (
+                    <div className="mt-2">
+                      <span className={`
+                        text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wide
+                        ${booking.status === 'CONFIRMED' ? 'bg-emerald-200 text-emerald-800' : ''}
+                        ${booking.status === 'PENDING' ? 'bg-amber-200 text-amber-800' : ''}
+                        ${booking.status === 'CANCELLED' ? 'bg-red-200 text-red-800' : ''}
+                        ${booking.status === 'BLOCKED' ? 'bg-gray-300 text-gray-700' : ''}
+                      `}>
+                        {booking.status === 'BLOCKED' ? 'BLOQUEADO' : booking.status}
+                      </span>
+                    </div>
+                  )}
                 </div>
-               );
+              );
             })}
+
+            {/* Drop Zone Indicator when dragging */}
+            {isDragging && (
+              <div className="absolute inset-0 bg-blue-500/5 border-2 border-dashed border-blue-400 rounded-xl pointer-events-none z-10">
+                <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-blue-500 text-white px-4 py-2 rounded-full text-sm font-medium shadow-lg">
+                  Suelta para cambiar horario
+                </div>
+              </div>
+            )}
           </div>
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div className="border-t border-gray-200 bg-gray-50 px-4 py-3 flex items-center gap-6 text-xs">
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-4 bg-emerald-50 border-l-4 border-emerald-500 rounded"></div>
+          <span className="text-gray-600">Confirmado/Pagado</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-4 bg-amber-50 border-l-4 border-amber-500 rounded"></div>
+          <span className="text-gray-600">Pendiente</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-4 bg-gray-100 border-l-4 border-gray-400 rounded diagonal-stripes"></div>
+          <span className="text-gray-600">Bloqueado</span>
         </div>
       </div>
     </div>
   );
 }
+
 
 ========== FILE: ./components/admin/calendar/MonthView.tsx ==========
 import { 
@@ -691,40 +1196,49 @@ export default function MonthView({ currentDate, bookings, onDaySelect }: MonthV
         {days.map((day) => {
           // Filtrar turnos de este día
           const dayBookings = bookings.filter(b => isSameDay(new Date(b.bookingDate + 'T00:00:00'), day));
-          
+          const isBlocked = dayBookings.some(b => b.status === 'BLOCKED');
+          const nonBlockedBookings = dayBookings.filter(b => b.status !== 'BLOCKED');
+
           return (
-            <div 
+            <div
               key={day.toString()}
               onClick={() => onDaySelect(day)}
               className={`border-b border-r border-gray-100 p-2 transition-all cursor-pointer hover:bg-accent/5 group relative
                 ${isToday(day) ? 'bg-accent/5' : ''}
+                ${isBlocked ? 'bg-gray-100 diagonal-stripes' : ''}
               `}
             >
               <div className="flex justify-between items-start">
                 <span className={`
                   w-7 h-7 flex items-center justify-center rounded-full text-sm font-bold
-                  ${isToday(day) ? 'bg-accent text-white' : 'text-gray-700 group-hover:text-accent'}
+                  ${isToday(day) ? 'bg-accent text-white' : isBlocked ? 'text-gray-500' : 'text-gray-700 group-hover:text-accent'}
                 `}>
                   {format(day, 'd')}
                 </span>
-                {dayBookings.length > 0 && (
+                {isBlocked ? (
+                  <span className="text-[10px] bg-gray-300 px-1.5 py-0.5 rounded text-gray-700 font-bold">
+                    🔒 CERRADO
+                  </span>
+                ) : nonBlockedBookings.length > 0 ? (
                    <span className="text-[10px] bg-gray-100 px-1.5 py-0.5 rounded text-gray-500 font-medium">
-                     {dayBookings.length} citas
+                     {nonBlockedBookings.length} citas
                    </span>
-                )}
+                ) : null}
               </div>
 
-              {/* Lista mini de turnos */}
-              <div className="mt-2 space-y-1 overflow-y-auto max-h-[80px] no-scrollbar">
-                {dayBookings.slice(0, 3).map(booking => (
-                  <div key={booking.id} className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 truncate border-l-2 border-blue-400">
-                    {booking.bookingTime.slice(0, 5)} {booking.customerName.split(' ')[0]}
-                  </div>
-                ))}
-                {dayBookings.length > 3 && (
-                  <div className="text-[10px] text-gray-400 pl-1">+ {dayBookings.length - 3} más</div>
-                )}
-              </div>
+              {/* Lista mini de turnos - solo mostrar si NO está bloqueado */}
+              {!isBlocked && (
+                <div className="mt-2 space-y-1 overflow-y-auto max-h-[80px] no-scrollbar">
+                  {nonBlockedBookings.slice(0, 3).map(booking => (
+                    <div key={booking.id} className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 truncate border-l-2 border-blue-400">
+                      {booking.bookingTime.slice(0, 5)} {booking.customerName.split(' ')[0]}
+                    </div>
+                  ))}
+                  {nonBlockedBookings.length > 3 && (
+                    <div className="text-[10px] text-gray-400 pl-1">+ {nonBlockedBookings.length - 3} más</div>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}
@@ -802,6 +1316,7 @@ export default function YearView({ currentDate, onMonthSelect }: YearViewProps) 
 ========== FILE: ./components/admin/ImageUploader.tsx ==========
 import { useState, useRef } from 'react';
 import { uploadApi } from '../../api/upload';
+import { resolveImageUrl } from '../../utils/imageUtils';
 
 interface ImageUploaderProps {
   currentImageUrl?: string | null;
@@ -829,12 +1344,17 @@ export default function ImageUploader({ currentImageUrl, onImageUploaded }: Imag
 
     try {
       setUploading(true);
-      // Previsualización inmediata
+      // Previsualización inmediata con blob local
       const objectUrl = URL.createObjectURL(file);
       setPreview(objectUrl);
 
       // Subida real
       const url = await uploadApi.uploadImage(file);
+
+      // Actualizar preview con la URL del servidor y liberar el blob
+      URL.revokeObjectURL(objectUrl);
+      setPreview(url);
+
       onImageUploaded(url); // Notificar al padre la URL final del servidor
     } catch (error) {
       console.error('Error uploading image:', error);
@@ -866,10 +1386,10 @@ export default function ImageUploader({ currentImageUrl, onImageUploaded }: Imag
 
         {preview ? (
           <div className="relative w-full h-48 group">
-            <img 
-              src={preview} 
-              alt="Preview" 
-              className="w-full h-full object-contain rounded-lg" 
+            <img
+              src={resolveImageUrl(preview)}
+              alt="Preview"
+              className="w-full h-full object-contain rounded-lg"
             />
             <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity rounded-lg text-white font-medium">
               Click para cambiar
@@ -970,6 +1490,7 @@ export default function ProductForm({ product, onSubmit, onCancel }: ProductForm
     description: product?.description || '',
     shortDescription: product?.shortDescription || '',
     price: product?.price || 0,
+    offerPrice: product?.offerPrice || null as number | null,
     stock: product?.stock || 0,
     categoryId: product?.categoryId || null as number | null,
     isFeatured: product?.isFeatured || false,
@@ -1129,6 +1650,29 @@ export default function ProductForm({ product, onSubmit, onCancel }: ProductForm
           />
         </div>
       </div>
+
+      {/* Precio de Oferta (condicional) */}
+      {formData.isOffer && (
+        <div className="animate-fade-in">
+          <label className="block text-sm font-bold text-gray-700 mb-1">Precio de Oferta</label>
+          <div className="relative">
+            <span className="absolute left-3 top-2 text-gray-500">$</span>
+            <input
+              type="number"
+              value={formData.offerPrice || ''}
+              onChange={(e) => {
+                const val = parseFloat(e.target.value);
+                setFormData({ ...formData, offerPrice: isNaN(val) ? null : val });
+              }}
+              min="0"
+              step="0.01"
+              placeholder="Precio con descuento"
+              className="w-full px-4 py-2 pl-8 border border-orange-200 bg-orange-50 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-200 focus:border-orange-400"
+            />
+          </div>
+          <p className="text-xs text-orange-600 mt-1">Este precio se mostrará como oferta en lugar del precio normal</p>
+        </div>
+      )}
 
       {/* Categoría - AQUÍ ESTABA EL PROBLEMA */}
       <div>
@@ -1364,6 +1908,7 @@ import { useState, useEffect } from 'react';
 import { categoriasApi } from '../../api/categorias';
 import { CategoryType } from '../../types/domain';
 import type { Service, Category } from '../../types/domain';
+import ImageUploader from './ImageUploader';
 
 /**
  * Service form for create/edit
@@ -1383,6 +1928,8 @@ export default function ServiceForm({ service, onSubmit, onCancel }: ServiceForm
     description: service?.description || '',
     shortDescription: service?.shortDescription || '',
     price: service?.price || 0,
+    offerPrice: service?.offerPrice || null as number | null,
+    isOffer: service?.isOffer || false,
     durationMinutes: service?.durationMinutes || 60,
     categoryId: service?.categoryId || null as number | null,
     isFeatured: service?.isFeatured || false,
@@ -1509,37 +2056,67 @@ export default function ServiceForm({ service, onSubmit, onCancel }: ServiceForm
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">URL de Imagen</label>
-        <input
-          type="text"
-          value={formData.imageUrl}
-          onChange={(e) => setFormData({ ...formData, imageUrl: e.target.value })}
-          placeholder="https://ejemplo.com/imagen.jpg"
-          className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
+        <ImageUploader
+          currentImageUrl={formData.imageUrl}
+          onImageUploaded={(url) => setFormData({ ...formData, imageUrl: url })}
         />
       </div>
 
-      <div className="flex items-center gap-6">
-        <label className="flex items-center gap-2">
+      {/* Toggles / Checkboxes */}
+      <div className="grid grid-cols-2 gap-4 bg-gray-50 p-4 rounded-xl border border-gray-100">
+        <label className="flex items-center gap-3 cursor-pointer">
           <input
             type="checkbox"
             checked={formData.isFeatured}
             onChange={(e) => setFormData({ ...formData, isFeatured: e.target.checked })}
-            className="w-4 h-4"
+            className="w-5 h-5 text-primary rounded focus:ring-primary border-gray-300"
           />
-          <span className="text-sm text-gray-700">Destacado en homepage</span>
+          <span className="text-sm text-gray-700 font-medium">Destacado</span>
         </label>
 
-        <label className="flex items-center gap-2">
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={formData.isOffer}
+            onChange={(e) => setFormData({ ...formData, isOffer: e.target.checked })}
+            className="w-5 h-5 text-primary rounded focus:ring-primary border-gray-300"
+          />
+          <span className="text-sm text-gray-700 font-medium">En oferta</span>
+        </label>
+
+        <label className="flex items-center gap-3 cursor-pointer">
           <input
             type="checkbox"
             checked={formData.isActive}
             onChange={(e) => setFormData({ ...formData, isActive: e.target.checked })}
-            className="w-4 h-4"
+            className="w-5 h-5 text-green-600 rounded focus:ring-green-500 border-gray-300"
           />
-          <span className="text-sm text-gray-700">Activo</span>
+          <span className="text-sm text-gray-700 font-medium">Servicio Activo</span>
         </label>
       </div>
+
+      {/* Precio de Oferta (condicional) */}
+      {formData.isOffer && (
+        <div className="animate-fade-in">
+          <label className="block text-sm font-bold text-gray-700 mb-1">Precio de Oferta</label>
+          <div className="relative">
+            <span className="absolute left-3 top-2 text-gray-500">$</span>
+            <input
+              type="number"
+              value={formData.offerPrice || ''}
+              onChange={(e) => {
+                const val = parseFloat(e.target.value);
+                setFormData({ ...formData, offerPrice: isNaN(val) ? null : val });
+              }}
+              min="0"
+              step="0.01"
+              placeholder="Precio con descuento"
+              className="w-full px-4 py-2 pl-8 border border-orange-200 bg-orange-50 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-200 focus:border-orange-400"
+            />
+          </div>
+          <p className="text-xs text-orange-600 mt-1">Este precio se mostrará como oferta en lugar del precio normal</p>
+        </div>
+      )}
 
       <div className="flex gap-3 pt-4 border-t">
         <button
@@ -1845,6 +2422,7 @@ import { serviciosApi } from '../../api/servicios'; // Importamos api de servici
 import DateTimePicker from './DateTimePicker';
 import CustomerForm from './CustomerForm';
 import type { CreateBookingRequest, Service } from '../../types/domain';
+import { resolveImageUrl } from '../../utils/imageUtils';
 
 interface TurnoFlowProps {
   service?: Service | null; // Ahora es opcional
@@ -1949,8 +2527,8 @@ export default function TurnoFlow({ service: initialService }: TurnoFlowProps) {
             )}
 
             <div className="relative h-48 -mx-6 -mt-6 mb-6">
-              <img 
-                src={selectedService.imageUrl || '/placeholder-service.jpg'} 
+              <img
+                src={resolveImageUrl(selectedService.imageUrl) || '/placeholder-service.jpg'}
                 alt={selectedService.name}
                 className="w-full h-full object-cover"
                 onError={(e) => (e.currentTarget.src = 'https://placehold.co/400x300/F9F7F5/E5989B?text=Servicio')}
@@ -1989,7 +2567,7 @@ export default function TurnoFlow({ service: initialService }: TurnoFlowProps) {
                     className="flex items-center gap-4 p-4 rounded-2xl border border-gray-100 hover:border-accent hover:shadow-md transition-all text-left group"
                   >
                     <div className="w-16 h-16 rounded-xl bg-gray-50 overflow-hidden flex-shrink-0">
-                      <img src={s.imageUrl || ''} alt="" className="w-full h-full object-cover" onError={(e) => e.currentTarget.style.display = 'none'} />
+                      <img src={resolveImageUrl(s.imageUrl) || ''} alt="" className="w-full h-full object-cover" onError={(e) => e.currentTarget.style.display = 'none'} />
                     </div>
                     <div>
                       <h3 className="font-sans font-bold text-primary group-hover:text-accent transition-colors">{s.name}</h3>
@@ -2394,6 +2972,7 @@ export default function CategoryFilter({
 import { Link } from 'react-router-dom';
 import { useCart } from '../../context/CartContext';
 import type { Product } from '../../types/domain';
+import { resolveImageUrl } from '../../utils/imageUtils';
 
 interface ProductoCardProps {
   product: Product;
@@ -2446,7 +3025,7 @@ export default function ProductoCard({ product }: ProductoCardProps) {
         )}
 
         <img
-          src={product.imageUrl || '/placeholder.jpg'}
+          src={resolveImageUrl(product.imageUrl) || '/placeholder.jpg'}
           alt={product.name}
           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700"
           onError={(e) => (e.currentTarget.src = 'https://placehold.co/400x400/F9F7F5/E5989B?text=Producto')}
@@ -2466,9 +3045,22 @@ export default function ProductoCard({ product }: ProductoCardProps) {
 
         {/* 3. PRECIO Y ACCIÓN (Sticky Bottom) */}
         <div className="mt-auto pt-2 flex items-center justify-between gap-3">
-          <span className="font-sans font-bold text-xl text-primary">
-            ${product.price}
-          </span>
+          <div className="flex items-baseline gap-2">
+            {product.isOffer && product.offerPrice ? (
+              <>
+                <span className="font-sans font-bold text-xl text-accent">
+                  ${product.offerPrice}
+                </span>
+                <span className="font-sans text-sm text-gray-400 line-through">
+                  ${product.price}
+                </span>
+              </>
+            ) : (
+              <span className="font-sans font-bold text-xl text-primary">
+                ${product.price}
+              </span>
+            )}
+          </div>
 
           {/* ZONA DE ACCIÓN: Aquí ocurre la magia */}
           {quantityInCart > 0 ? (
@@ -2514,6 +3106,7 @@ export default function ProductoCard({ product }: ProductoCardProps) {
 ========== FILE: ./components/catalog/ServicioCard.tsx ==========
 import { Link } from 'react-router-dom';
 import type { Service } from '../../types/domain';
+import { resolveImageUrl } from '../../utils/imageUtils';
 
 /**
  * Service card component
@@ -2525,27 +3118,41 @@ interface ServicioCardProps {
 }
 
 export default function ServicioCard({ service }: ServicioCardProps) {
-  const imageUrl = service.imageUrl || '/placeholder-service.jpg';
+  const imageUrl = resolveImageUrl(service.imageUrl) || '/placeholder-service.jpg';
 
   return (
     <div className="bg-white rounded-lg shadow-md overflow-hidden hover:shadow-lg transition">
-      <img
-        src={imageUrl}
-        alt={service.name}
-        className="w-full h-48 object-cover"
-        onError={(e) => {
-          (e.target as HTMLImageElement).src = '/placeholder-service.jpg';
-        }}
-      />
+      <div className="relative">
+        {service.isOffer && service.offerPrice && (
+          <span className="absolute top-3 left-3 bg-accent text-white text-[10px] font-bold px-3 py-1 rounded-full z-10 shadow-sm tracking-wider">
+            OFERTA
+          </span>
+        )}
+        <img
+          src={imageUrl}
+          alt={service.name}
+          className="w-full h-48 object-cover"
+          onError={(e) => {
+            (e.target as HTMLImageElement).src = '/placeholder-service.jpg';
+          }}
+        />
+      </div>
       <div className="p-6">
         <h3 className="text-xl font-semibold text-gray-800 mb-2">{service.name}</h3>
         <p className="text-gray-600 mb-4 line-clamp-2">
           {service.shortDescription || service.description}
         </p>
         <div className="flex items-center justify-between">
-          <div>
-            <span className="text-2xl font-bold text-primary">${service.price}</span>
-            <span className="text-gray-500 text-sm ml-2">· {service.durationMinutes} min</span>
+          <div className="flex items-baseline gap-2 flex-wrap">
+            {service.isOffer && service.offerPrice ? (
+              <>
+                <span className="text-2xl font-bold text-accent">${service.offerPrice}</span>
+                <span className="text-base text-gray-400 line-through">${service.price}</span>
+              </>
+            ) : (
+              <span className="text-2xl font-bold text-primary">${service.price}</span>
+            )}
+            <span className="text-gray-500 text-sm">· {service.durationMinutes} min</span>
           </div>
         </div>
         <Link
@@ -2608,8 +3215,8 @@ export default function Navbar() {
               className="relative group p-2 text-primary hover:text-accent transition-colors"
               aria-label="Ver carrito"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 10.5V6a3.75 3.75 0 10-7.5 0v4.5m11.356-1.993l1.263 5c.07.286-.06.591-.292.684l-1.428.571M12 18.75a6 6 0 006-6M12 18.75a6 6 0 01-6-6m0 0V6m0 0A2.25 2.25 0 0113.5 2.25H15" />
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6">
+                <circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/>
               </svg>
               
               {itemCount > 0 && (
@@ -2705,8 +3312,8 @@ export default function Navbar() {
               <div className="flex items-center gap-2">
                 <span className="text-sm text-gray-500">{itemCount} items</span>
                 <div className="bg-accent/10 p-2 rounded-full text-accent">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 10.5V6a3.75 3.75 0 10-7.5 0v4.5m11.356-1.993l1.263 5c.07.286-.06.591-.292.684l-1.428.571M12 18.75a6 6 0 006-6M12 18.75a6 6 0 01-6-6m0 0V6m0 0A2.25 2.25 0 0113.5 2.25H15" />
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+                        <circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/>
                     </svg>
                 </div>
               </div>
@@ -3343,7 +3950,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const itemCount = state.items.reduce((total, item) => total + item.quantity, 0);
 
   const subtotal = state.items.reduce(
-    (total, item) => total + item.product.price * item.quantity,
+    (total, item) => {
+      const effectivePrice = item.product.isOffer && item.product.offerPrice
+        ? item.product.offerPrice
+        : item.product.price;
+      return total + effectivePrice * item.quantity;
+    },
     0
   );
 
@@ -3400,17 +4012,18 @@ import { useState } from 'react';
 import { Outlet, Navigate, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Toaster } from 'sonner';
-import { 
-  LayoutDashboard, 
-  CalendarDays, 
-  ShoppingBag, 
-  Sparkles, 
-  Package, 
-  Settings, 
-  Menu, 
-  X, 
+import {
+  LayoutDashboard,
+  CalendarDays,
+  ShoppingBag,
+  Sparkles,
+  Package,
+  Settings,
+  Menu,
+  X,
   LogOut,
-  User
+  User,
+  Tag
 } from 'lucide-react';
 
 // Tipado para los items del menú
@@ -3476,6 +4089,7 @@ const SidebarContent = ({ onItemClick }: { onItemClick?: () => void }) => {
         </div>
         <LinkItem to="/admin/servicios" icon={Sparkles} label="Servicios" onClick={onItemClick} />
         <LinkItem to="/admin/productos" icon={Package} label="Productos" onClick={onItemClick} />
+        <LinkItem to="/admin/categorias" icon={Tag} label="Categorías" onClick={onItemClick} />
         
         <div className="pt-6 pb-2 px-4">
           <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Sistema</p>
@@ -3568,26 +4182,47 @@ import { Outlet } from 'react-router-dom';
 import Navbar from '../components/common/Navbar';
 
 // Footer Component (Definido aquí mismo para simplificar, luego puedes moverlo)
-const Footer = () => (
-  <footer className="bg-white border-t border-gray-100 py-12 mt-auto">
-    <div className="container mx-auto px-4">
-      <div className="flex flex-col md:flex-row justify-between items-center gap-6">
-        <div className="text-center md:text-left">
-          <h3 className="font-serif text-xl font-bold text-accent mb-2">Flavia Dermobeauty</h3>
-          <p className="text-gray-500 text-sm">Realzando tu belleza natural con ciencia y dedicación.</p>
+const Footer = () => {
+  const creatorName = import.meta.env.VITE_CREATOR_NAME || 'Jeremías Molina';
+  const creatorUrl = import.meta.env.VITE_CREATOR_URL || 'https://instagram.com/';
+
+  return (
+    <footer className="bg-white border-t border-gray-100 py-12 mt-auto">
+      <div className="container mx-auto px-4">
+        <div className="flex flex-col md:flex-row justify-between items-center gap-6">
+          <div className="text-center md:text-left">
+            <h3 className="font-serif text-xl font-bold text-accent mb-2">Flavia Dermobeauty</h3>
+            <p className="text-gray-500 text-sm">Realzando tu belleza natural con ciencia y dedicación.</p>
+          </div>
+          <div className="flex gap-6 text-sm text-primary-light">
+            <a href="#" className="hover:text-accent transition">Instagram</a>
+            <a href="#" className="hover:text-accent transition">WhatsApp</a>
+            <a href="#" className="hover:text-accent transition">Ubicación</a>
+          </div>
         </div>
-        <div className="flex gap-6 text-sm text-primary-light">
-          <a href="#" className="hover:text-accent transition">Instagram</a>
-          <a href="#" className="hover:text-accent transition">WhatsApp</a>
-          <a href="#" className="hover:text-accent transition">Ubicación</a>
+
+        {/* Bottom */}
+        <div className="border-t border-gray-100 mt-8 pt-8 text-center text-xs text-gray-400 space-y-2">
+          <div>
+            &copy; {new Date().getFullYear()} Flavia Dermobeauty. Todos los derechos reservados.
+          </div>
+
+          <div>
+            <a
+              href={creatorUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`Abrir Instagram de ${creatorName}`}
+              className="hover:text-accent transition underline-offset-4 hover:underline"
+            >
+              Desarrollado por {creatorName}
+            </a>
+          </div>
         </div>
       </div>
-      <div className="border-t border-gray-100 mt-8 pt-8 text-center text-xs text-gray-400">
-        &copy; {new Date().getFullYear()} Flavia Dermobeauty. Todos los derechos reservados.
-      </div>
-    </div>
-  </footer>
-);
+    </footer>
+  );
+};
 
 export default function MainLayout() {
   return (
@@ -3619,17 +4254,294 @@ createRoot(document.getElementById('root')!).render(
 )
 
 
+========== FILE: ./pages/admin/AdminCategoriasPage.tsx ==========
+import { useEffect, useState } from 'react';
+import { adminApi } from '../../api/admin';
+import { CategoryType } from '../../types/domain';
+import type { Category } from '../../types/domain';
+import { toast } from 'sonner';
+import { Plus, Pencil, Trash2, Tag, Loader2, X } from 'lucide-react';
+
+export default function AdminCategoriasPage() {
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<'SERVICE' | 'PRODUCT'>('SERVICE');
+  const [showModal, setShowModal] = useState(false);
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [formData, setFormData] = useState({
+    name: '',
+    description: '',
+    type: 'SERVICE' as 'SERVICE' | 'PRODUCT',
+  });
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    loadCategories();
+  }, []);
+
+  const loadCategories = async () => {
+    try {
+      setLoading(true);
+      const data = await adminApi.categories.getAll();
+      setCategories(data);
+    } catch (err) {
+      console.error(err);
+      toast.error('Error al cargar categorías');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOpenModal = (category?: Category) => {
+    if (category) {
+      setEditingCategory(category);
+      setFormData({
+        name: category.name,
+        description: category.description || '',
+        type: category.type as 'SERVICE' | 'PRODUCT',
+      });
+    } else {
+      setEditingCategory(null);
+      setFormData({
+        name: '',
+        description: '',
+        type: activeTab,
+      });
+    }
+    setShowModal(true);
+  };
+
+  const handleCloseModal = () => {
+    setShowModal(false);
+    setEditingCategory(null);
+    setFormData({ name: '', description: '', type: 'SERVICE' });
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formData.name.trim()) {
+      toast.error('El nombre es obligatorio');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      if (editingCategory) {
+        await adminApi.categories.update(editingCategory.id, formData);
+        toast.success('Categoría actualizada');
+      } else {
+        await adminApi.categories.create(formData);
+        toast.success('Categoría creada');
+      }
+      handleCloseModal();
+      loadCategories();
+    } catch (err) {
+      console.error(err);
+      toast.error('Error al guardar la categoría');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: number) => {
+    if (!confirm('¿Estás seguro de eliminar esta categoría?')) return;
+
+    try {
+      await adminApi.categories.delete(id);
+      toast.success('Categoría eliminada');
+      loadCategories();
+    } catch (err) {
+      console.error(err);
+      toast.error('Error al eliminar. Puede que tenga productos/servicios asociados.');
+    }
+  };
+
+  const filteredCategories = categories.filter((c) => c.type === activeTab);
+
+  if (loading) {
+    return (
+      <div className="h-96 flex items-center justify-center text-gray-400">
+        <Loader2 className="animate-spin mr-2" /> Cargando categorías...
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto animate-fade-in pb-20">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Gestión de Categorías</h1>
+          <p className="text-gray-500 text-sm mt-1">Organiza tus productos y servicios por categorías.</p>
+        </div>
+        <button
+          onClick={() => handleOpenModal()}
+          className="flex items-center gap-2 bg-primary text-white px-5 py-2.5 rounded-xl font-bold hover:bg-primary-dark transition-all shadow-md"
+        >
+          <Plus size={18} /> Nueva Categoría
+        </button>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex gap-2 mb-6">
+        <button
+          onClick={() => setActiveTab('SERVICE')}
+          className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all ${
+            activeTab === 'SERVICE'
+              ? 'bg-purple-100 text-purple-700 border border-purple-200'
+              : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-50'
+          }`}
+        >
+          Servicios
+        </button>
+        <button
+          onClick={() => setActiveTab('PRODUCT')}
+          className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all ${
+            activeTab === 'PRODUCT'
+              ? 'bg-pink-100 text-pink-700 border border-pink-200'
+              : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-50'
+          }`}
+        >
+          Productos
+        </button>
+      </div>
+
+      {/* Lista de Categorías */}
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+        {filteredCategories.length === 0 ? (
+          <div className="py-12 text-center">
+            <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mx-auto mb-4 text-gray-300">
+              <Tag size={24} />
+            </div>
+            <p className="text-gray-500 font-medium">No hay categorías de {activeTab === 'SERVICE' ? 'servicios' : 'productos'}</p>
+            <button
+              onClick={() => handleOpenModal()}
+              className="mt-4 text-primary font-bold text-sm hover:underline"
+            >
+              Crear la primera categoría
+            </button>
+          </div>
+        ) : (
+          <ul className="divide-y divide-gray-100">
+            {filteredCategories.map((category) => (
+              <li key={category.id} className="flex items-center justify-between px-6 py-4 hover:bg-gray-50 transition-colors">
+                <div className="flex items-center gap-4">
+                  <div className={`p-2 rounded-lg ${activeTab === 'SERVICE' ? 'bg-purple-100 text-purple-600' : 'bg-pink-100 text-pink-600'}`}>
+                    <Tag size={18} />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-gray-900">{category.name}</p>
+                    {category.description && (
+                      <p className="text-sm text-gray-500">{category.description}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleOpenModal(category)}
+                    className="p-2 text-gray-400 hover:text-primary hover:bg-gray-100 rounded-lg transition-colors"
+                    title="Editar"
+                  >
+                    <Pencil size={16} />
+                  </button>
+                  <button
+                    onClick={() => handleDelete(category.id)}
+                    className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                    title="Eliminar"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* Modal */}
+      {showModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 animate-fade-in">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md mx-4 animate-slide-up">
+            <div className="flex items-center justify-between p-6 border-b border-gray-100">
+              <h2 className="text-lg font-bold text-gray-900">
+                {editingCategory ? 'Editar Categoría' : 'Nueva Categoría'}
+              </h2>
+              <button onClick={handleCloseModal} className="text-gray-400 hover:text-gray-600">
+                <X size={20} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmit} className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Tipo</label>
+                <select
+                  value={formData.type}
+                  onChange={(e) => setFormData({ ...formData, type: e.target.value as 'SERVICE' | 'PRODUCT' })}
+                  className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                  disabled={!!editingCategory}
+                >
+                  <option value="SERVICE">Servicio</option>
+                  <option value="PRODUCT">Producto</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Nombre *</label>
+                <input
+                  type="text"
+                  value={formData.name}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                  placeholder="Ej: Tratamientos Faciales"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Descripción</label>
+                <textarea
+                  value={formData.description}
+                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                  className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                  rows={3}
+                  placeholder="Descripción opcional..."
+                />
+              </div>
+
+              <div className="flex gap-3 pt-4 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={handleCloseModal}
+                  className="flex-1 px-6 py-2.5 border border-gray-300 rounded-xl hover:bg-gray-50 font-medium transition-colors text-gray-600"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="flex-1 px-6 py-2.5 bg-primary text-white rounded-xl hover:bg-primary-dark disabled:opacity-50 font-bold transition-all shadow-md"
+                >
+                  {saving ? 'Guardando...' : editingCategory ? 'Guardar' : 'Crear'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 ========== FILE: ./pages/admin/AdminConfigPage.tsx ==========
 import { useEffect, useState } from 'react';
 import { adminApi } from '../../api/admin';
 import ScheduleEditor from '../../components/admin/ScheduleEditor';
 import { toast } from 'sonner';
-import { 
-  Store, 
-  CalendarClock, 
-  Truck, 
-  LayoutTemplate, 
-  Save, 
+import {
+  Store,
+  CalendarClock,
+  Truck,
+  Save,
   Loader2,
   Globe,
   Instagram,
@@ -3640,8 +4552,7 @@ import {
 } from 'lucide-react';
 
 // Definimos las secciones de configuración
-// Eliminamos 'contact' porque la unificamos con 'general'
-type SettingsTab = 'general' | 'agenda' | 'store' | 'content';
+type SettingsTab = 'general' | 'agenda' | 'store';
 
 // Sub-componente de Botón de Menú Lateral (Corregido y Accesible)
 const TabButton = ({ 
@@ -3762,13 +4673,9 @@ export default function AdminConfigPage() {
             id="agenda" label="Agenda & Turnos" icon={CalendarClock} description="Horarios de atención y políticas." 
             isActive={activeTab === 'agenda'} onClick={() => setActiveTab('agenda')}
           />
-          <TabButton 
-            id="store" label="Tienda & Envíos" icon={Truck} description="Costos de envío y reglas de venta." 
+          <TabButton
+            id="store" label="Tienda & Envíos" icon={Truck} description="Costos de envío y reglas de venta."
             isActive={activeTab === 'store'} onClick={() => setActiveTab('store')}
-          />
-          <TabButton 
-            id="content" label="Contenido & Portada" icon={LayoutTemplate} description="Textos del Hero y banners." 
-            isActive={activeTab === 'content'} onClick={() => setActiveTab('content')}
           />
         </div>
 
@@ -3782,7 +4689,6 @@ export default function AdminConfigPage() {
                 {activeTab === 'general' && 'Información Pública'}
                 {activeTab === 'agenda' && 'Reglas de Agenda'}
                 {activeTab === 'store' && 'Configuración E-commerce'}
-                {activeTab === 'content' && 'Gestión de Contenidos'}
               </h2>
               <button 
                 onClick={handleSave}
@@ -3968,43 +4874,6 @@ export default function AdminConfigPage() {
                 </div>
               )}
 
-              {/* --- TAB: CONTENT --- */}
-              {activeTab === 'content' && (
-                <div className="space-y-6 animate-fade-in">
-                  <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
-                    <h4 className="font-bold text-gray-900 mb-4">Sección Principal (Hero Home)</h4>
-                    
-                    <div className="space-y-4">
-                      <InputGroup label="Título Principal">
-                        <input 
-                          type="text" 
-                          value={values['hero.title'] || ''}
-                          onChange={e => handleChange('hero.title', e.target.value)}
-                          className="form-input font-serif text-lg" 
-                        />
-                      </InputGroup>
-                      
-                      <InputGroup label="Subtítulo">
-                        <textarea 
-                          value={values['hero.subtitle'] || ''}
-                          onChange={e => handleChange('hero.subtitle', e.target.value)}
-                          className="form-textarea"
-                          rows={2}
-                        />
-                      </InputGroup>
-
-                      <InputGroup label="Texto Botón CTA">
-                        <input 
-                          type="text" 
-                          value={values['hero.cta_text'] || 'Reservar Turno'}
-                          onChange={e => handleChange('hero.cta_text', e.target.value)}
-                          className="form-input w-1/2" 
-                        />
-                      </InputGroup>
-                    </div>
-                  </div>
-                </div>
-              )}
 
             </div>
           </div>
@@ -4052,12 +4921,17 @@ export default function AdminDashboardPage() {
 
   const loadStats = async () => {
     try {
-      const [services, products, bookings, orders] = await Promise.all([
+      // Usamos size grande para obtener todos los items en el conteo
+      const [services, productsPage, bookings, ordersPage] = await Promise.all([
         adminApi.services.getAll(),
-        adminApi.products.getAll(),
+        adminApi.products.getAll(0, 1000),
         adminApi.bookings.getAll(),
-        adminApi.orders.getAll(),
+        adminApi.orders.getAll(0, 1000),
       ]);
+
+      // Extract content arrays from paginated responses
+      const products = productsPage.content;
+      const orders = ordersPage.content;
 
       // Calculamos turnos de HOY (en local time para simplificar visualización)
       const todayStr = new Date().toISOString().split('T')[0];
@@ -4347,17 +5221,19 @@ export default function AdminLoginPage() {
 
 ========== FILE: ./pages/admin/AdminPedidosPage.tsx ==========
 import { useEffect, useState } from 'react';
-import { adminApi } from '../../api/admin';
+import { adminApi, type PageResponse } from '../../api/admin';
 import { OrderStatus } from '../../types/domain';
 import type { Order } from '../../types/domain';
 import { toast } from 'sonner';
-import { 
-  ChevronDown, 
-  ChevronUp, 
-  Package, 
-  Truck, 
-  User, 
+import {
+  ChevronDown,
+  ChevronUp,
+  Package,
+  Truck,
+  User,
   Search,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 
 export default function AdminPedidosPage() {
@@ -4366,20 +5242,23 @@ export default function AdminPedidosPage() {
   const [filterStatus, setFilterStatus] = useState<string>('ALL');
   const [expandedOrderId, setExpandedOrderId] = useState<number | null>(null);
 
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(0);
+  const [pageSize] = useState(10);
+  const [totalPages, setTotalPages] = useState(0);
+  const [totalElements, setTotalElements] = useState(0);
+
   useEffect(() => {
     loadOrders();
-  }, []);
+  }, [currentPage]);
 
   const loadOrders = async () => {
     try {
       setLoading(true);
-      const data = await adminApi.orders.getAll();
-      const sorted = data.sort((a, b) => {
-        const dateA = new Date(a.createdAt || 0);
-        const dateB = new Date(b.createdAt || 0);
-        return dateB.getTime() - dateA.getTime();
-      });
-      setOrders(sorted);
+      const pageData: PageResponse<Order> = await adminApi.orders.getAll(currentPage, pageSize);
+      setOrders(pageData.content);
+      setTotalPages(pageData.totalPages);
+      setTotalElements(pageData.totalElements);
     } catch (err) {
       console.error(err);
       toast.error('Error al cargar pedidos');
@@ -4445,6 +5324,14 @@ export default function AdminPedidosPage() {
 
       {/* Tabla */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+        {/* Pagination Header */}
+        <div className="px-6 py-3 bg-gray-50/50 border-b border-gray-200 flex items-center justify-between">
+          <p className="text-sm text-gray-500">
+            Mostrando <span className="font-medium text-gray-700">{orders.length}</span> de{' '}
+            <span className="font-medium text-gray-700">{totalElements}</span> pedidos
+          </p>
+        </div>
+
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead className="bg-gray-50/50 border-b border-gray-200">
@@ -4579,6 +5466,34 @@ export default function AdminPedidosPage() {
             <p className="text-gray-500 font-medium">No hay pedidos en esta categoría</p>
           </div>
         )}
+
+        {/* Pagination Footer */}
+        {totalPages > 1 && (
+          <div className="px-6 py-4 bg-gray-50/50 border-t border-gray-200 flex items-center justify-between">
+            <div className="text-sm text-gray-500">
+              Página <span className="font-medium text-gray-700">{currentPage + 1}</span> de{' '}
+              <span className="font-medium text-gray-700">{totalPages}</span>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => setCurrentPage(prev => prev - 1)}
+                disabled={currentPage === 0}
+                className="flex items-center gap-1 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                <ChevronLeft size={16} /> Anterior
+              </button>
+
+              <button
+                onClick={() => setCurrentPage(prev => prev + 1)}
+                disabled={currentPage >= totalPages - 1}
+                className="flex items-center gap-1 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                Siguiente <ChevronRight size={16} />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -4586,17 +5501,19 @@ export default function AdminPedidosPage() {
 
 ========== FILE: ./pages/admin/AdminProductosPage.tsx ==========
 import { useEffect, useState } from 'react';
-import { adminApi } from '../../api/admin';
+import { adminApi, type PageResponse } from '../../api/admin';
 import Modal from '../../components/admin/Modal';
 import ProductForm from '../../components/admin/ProductForm';
 import type { Product } from '../../types/domain';
 import { toast } from 'sonner';
-import { 
-  Plus, 
-  Edit2, 
-  Trash2, 
-  Star, 
-  AlertCircle 
+import {
+  Plus,
+  Edit2,
+  Trash2,
+  Star,
+  AlertCircle,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 
 export default function AdminProductosPage() {
@@ -4605,15 +5522,23 @@ export default function AdminProductosPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
 
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(0);
+  const [pageSize] = useState(10);
+  const [totalPages, setTotalPages] = useState(0);
+  const [totalElements, setTotalElements] = useState(0);
+
   useEffect(() => {
     loadProducts();
-  }, []);
+  }, [currentPage]);
 
   const loadProducts = async () => {
     try {
       setLoading(true);
-      const data = await adminApi.products.getAll();
-      setProducts(data);
+      const pageData: PageResponse<Product> = await adminApi.products.getAll(currentPage, pageSize);
+      setProducts(pageData.content);
+      setTotalPages(pageData.totalPages);
+      setTotalElements(pageData.totalElements);
     } catch (err) {
       console.error(err);
       toast.error('No se pudieron cargar los productos');
@@ -4684,6 +5609,14 @@ export default function AdminProductosPage() {
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+        {/* Pagination Header */}
+        <div className="px-6 py-3 bg-gray-50/50 border-b border-gray-200 flex items-center justify-between">
+          <p className="text-sm text-gray-500">
+            Mostrando <span className="font-medium text-gray-700">{products.length}</span> de{' '}
+            <span className="font-medium text-gray-700">{totalElements}</span> productos
+          </p>
+        </div>
+
         <table className="w-full">
           <thead className="bg-gray-50/50 border-b border-gray-200">
             <tr>
@@ -4764,6 +5697,34 @@ export default function AdminProductosPage() {
         
         {products.length === 0 && (
           <div className="py-12 text-center text-gray-400 text-sm">No hay productos registrados.</div>
+        )}
+
+        {/* Pagination Footer */}
+        {totalPages > 1 && (
+          <div className="px-6 py-4 bg-gray-50/50 border-t border-gray-200 flex items-center justify-between">
+            <div className="text-sm text-gray-500">
+              Página <span className="font-medium text-gray-700">{currentPage + 1}</span> de{' '}
+              <span className="font-medium text-gray-700">{totalPages}</span>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => setCurrentPage(prev => prev - 1)}
+                disabled={currentPage === 0}
+                className="flex items-center gap-1 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                <ChevronLeft size={16} /> Anterior
+              </button>
+
+              <button
+                onClick={() => setCurrentPage(prev => prev + 1)}
+                disabled={currentPage >= totalPages - 1}
+                className="flex items-center gap-1 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                Siguiente <ChevronRight size={16} />
+              </button>
+            </div>
+          </div>
         )}
       </div>
 
@@ -4982,7 +5943,7 @@ import { addMonths, subMonths, format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import YearView from '../../components/admin/calendar/YearView';
 import MonthView from '../../components/admin/calendar/MonthView';
-import DayView from '../../components/admin/calendar/DayView';
+import CalendarContainer from '../../components/admin/calendar/CalendarContainer';
 import Modal from '../../components/admin/Modal';
 import DateTimePicker from '../../components/booking/DateTimePicker';
 import type { Booking, Service, CreateBookingRequest } from '../../types/domain';
@@ -5060,27 +6021,75 @@ export default function AdminTurnosPage() {
 
       // Usamos la API pública para crear (reutilización de lógica)
       await turnosApi.create(request);
-      
+
       // Nota: No redirigimos a MercadoPago. Asumimos que es pago en efectivo o bloqueo.
       // El backend lo deja en PENDING. Podríamos agregar un endpoint para pasarlo a CONFIRMED directo,
       // pero para MVP basta con crearlo.
 
       alert(isBlock ? 'Horario bloqueado con éxito' : 'Turno agendado con éxito');
       setIsModalOpen(false);
-      
+
       // Reset form
       setManualName('');
       setManualPhone('');
       setIsBlock(false);
       setBookingDate('');
       setBookingTime('');
-      
+
       loadBookings(); // Recargar calendario
     } catch (error) {
       console.error(error);
       alert('Error al crear el turno. Verificá que el horario esté disponible.');
     }
   };
+
+  const handleReschedule = async (bookingId: number, newDate: string, newTime: string) => {
+    await adminApi.bookings.reschedule(bookingId, newDate, newTime);
+    loadBookings(); // Reload to show updated position
+  };
+
+  const handleSlotClick = (time: string) => {
+    // Pre-fill the time and open modal
+    setBookingTime(time);
+    setBookingDate(format(currentDate, 'yyyy-MM-dd'));
+    setIsModalOpen(true);
+  };
+
+  const handleBlockDay = async () => {
+    const dateStr = format(currentDate, 'yyyy-MM-dd');
+    const reason = prompt('Motivo del bloqueo (opcional):', 'Día bloqueado - Holiday');
+
+    if (reason === null) return; // User cancelled
+
+    try {
+      await adminApi.bookings.blockDay(dateStr, reason || undefined);
+      alert('Día bloqueado exitosamente');
+      loadBookings(); // Reload calendar
+    } catch (error) {
+      console.error(error);
+      alert('Error al bloquear el día');
+    }
+  };
+
+  const handleUnblockDay = async () => {
+    const dateStr = format(currentDate, 'yyyy-MM-dd');
+
+    if (!confirm('¿Desbloquear este día?')) return;
+
+    try {
+      await adminApi.bookings.unblockDay(dateStr);
+      alert('Día desbloqueado exitosamente');
+      loadBookings(); // Reload calendar
+    } catch (error) {
+      console.error(error);
+      alert('Error al desbloquear el día');
+    }
+  };
+
+  // Check if current day is blocked
+  const isDayBlocked = bookings.some(
+    b => b.bookingDate === format(currentDate, 'yyyy-MM-dd') && b.status === 'BLOCKED'
+  );
 
   return (
     <div className="space-y-6">
@@ -5108,12 +6117,33 @@ export default function AdminTurnosPage() {
           <button onClick={handleNext} className="p-2 hover:bg-gray-100 rounded-full text-gray-500">→</button>
         </div>
 
-        <button 
-          onClick={() => setIsModalOpen(true)}
-          className="bg-accent text-white px-6 py-2.5 rounded-full font-bold shadow-soft hover:shadow-lg transition-all text-sm"
-        >
-          + Nuevo Turno
-        </button>
+        <div className="flex gap-2">
+          {view === 'day' && (
+            <>
+              {!isDayBlocked ? (
+                <button
+                  onClick={handleBlockDay}
+                  className="bg-gray-500 text-white px-4 py-2.5 rounded-full font-bold shadow-soft hover:shadow-lg transition-all text-sm"
+                >
+                  🔒 Bloquear Día
+                </button>
+              ) : (
+                <button
+                  onClick={handleUnblockDay}
+                  className="bg-orange-500 text-white px-4 py-2.5 rounded-full font-bold shadow-soft hover:shadow-lg transition-all text-sm"
+                >
+                  🔓 Desbloquear Día
+                </button>
+              )}
+            </>
+          )}
+          <button
+            onClick={() => setIsModalOpen(true)}
+            className="bg-accent text-white px-6 py-2.5 rounded-full font-bold shadow-soft hover:shadow-lg transition-all text-sm"
+          >
+            + Nuevo Turno
+          </button>
+        </div>
       </div>
 
       {/* VISTAS CALENDARIO */}
@@ -5124,7 +6154,14 @@ export default function AdminTurnosPage() {
           <>
             {view === 'year' && <YearView currentDate={currentDate} onMonthSelect={(d) => { setCurrentDate(d); setView('month'); }} />}
             {view === 'month' && <MonthView currentDate={currentDate} bookings={bookings} onDaySelect={(d) => { setCurrentDate(d); setView('day'); }} />}
-            {view === 'day' && <DayView currentDate={currentDate} bookings={bookings} />}
+            {view === 'day' && (
+              <CalendarContainer
+                currentDate={currentDate}
+                bookings={bookings}
+                onSlotClick={handleSlotClick}
+                onReschedule={handleReschedule}
+              />
+            )}
           </>
         )}
       </div>
@@ -5231,6 +6268,7 @@ import { useCart } from '../context/CartContext';
 import { pedidosApi } from '../api/pedidos';
 import { DeliveryType } from '../types/domain';
 import type { CreateOrderRequest } from '../types/domain';
+import { resolveImageUrl } from '../utils/imageUtils';
 
 // Costo de envío fijo (Debería venir del backend, pero lo dejamos visual por ahora)
 const DELIVERY_COST = 1500; 
@@ -5313,8 +6351,8 @@ export default function CarritoPage() {
       <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4">
         <div className="bg-white p-12 rounded-3xl text-center max-w-md shadow-soft">
           <div className="w-20 h-20 bg-accent/10 rounded-full flex items-center justify-center mx-auto mb-6 text-accent">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-10 h-10">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 10.5V6a3.75 3.75 0 10-7.5 0v4.5m11.356-1.993l1.263 5c.07.286-.06.591-.292.684l-1.428.571M12 18.75a6 6 0 006-6M12 18.75a6 6 0 01-6-6m0 0V6m0 0A2.25 2.25 0 0113.5 2.25H15" />
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-10 h-10">
+              <circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/>
             </svg>
           </div>
           <h2 className="font-serif text-2xl font-bold text-primary mb-2">Tu carrito está vacío</h2>
@@ -5342,16 +6380,26 @@ export default function CarritoPage() {
                 {items.map((item) => (
                   <div key={item.product.id} className="flex gap-4 items-center">
                     <div className="w-20 h-20 bg-gray-50 rounded-xl overflow-hidden flex-shrink-0">
-                      <img 
-                        src={item.product.imageUrl || '/placeholder.jpg'} 
-                        alt={item.product.name} 
+                      <img
+                        src={resolveImageUrl(item.product.imageUrl) || '/placeholder.jpg'}
+                        alt={item.product.name}
                         className="w-full h-full object-cover"
                         onError={(e) => (e.currentTarget.src = 'https://placehold.co/100x100')}
                       />
                     </div>
                     <div className="flex-grow">
                       <h4 className="font-sans font-medium text-primary">{item.product.name}</h4>
-                      <p className="text-sm text-gray-500">${item.product.price} x {item.quantity}</p>
+                      <p className="text-sm text-gray-500">
+                        {item.product.isOffer && item.product.offerPrice ? (
+                          <>
+                            <span className="text-accent font-medium">${item.product.offerPrice}</span>
+                            <span className="line-through ml-1">${item.product.price}</span>
+                          </>
+                        ) : (
+                          <span>${item.product.price}</span>
+                        )}
+                        {' '}x {item.quantity}
+                      </p>
                     </div>
                     <div className="flex items-center gap-3">
                       <div className="flex items-center bg-gray-50 rounded-lg">
@@ -5740,6 +6788,7 @@ import { useParams, Link } from 'react-router-dom';
 import { productosApi } from '../api/productos';
 import { useCart } from '../context/CartContext';
 import type { Product } from '../types/domain';
+import { resolveImageUrl } from '../utils/imageUtils';
 
 export default function ProductDetailPage() {
   const { slug } = useParams<{ slug: string }>();
@@ -5783,8 +6832,8 @@ export default function ProductDetailPage() {
         <div className="grid md:grid-cols-2 gap-12 bg-white p-8 rounded-[3rem] shadow-soft">
           {/* Columna Imagen */}
           <div className="relative aspect-square rounded-3xl overflow-hidden bg-gray-50">
-            <img 
-              src={product.imageUrl || '/placeholder.jpg'} 
+            <img
+              src={resolveImageUrl(product.imageUrl) || '/placeholder.jpg'}
               alt={product.name}
               className="w-full h-full object-cover"
             />
@@ -5799,7 +6848,16 @@ export default function ProductDetailPage() {
           <div className="flex flex-col justify-center">
             <span className="text-gray-400 text-sm font-bold uppercase tracking-wider mb-2">{product.categoryName}</span>
             <h1 className="font-serif text-4xl font-bold text-primary mb-4">{product.name}</h1>
-            <div className="text-3xl font-light text-primary mb-6">${product.price}</div>
+            <div className="flex items-baseline gap-3 mb-6">
+              {product.isOffer && product.offerPrice ? (
+                <>
+                  <span className="text-3xl font-bold text-accent">${product.offerPrice}</span>
+                  <span className="text-xl text-gray-400 line-through">${product.price}</span>
+                </>
+              ) : (
+                <span className="text-3xl font-light text-primary">${product.price}</span>
+              )}
+            </div>
             
             <p className="text-gray-600 leading-relaxed mb-8 font-sans">
               {product.description}
@@ -6164,9 +7222,96 @@ export default function ServiciosPage() {
   .form-input {
     @apply w-full px-4 py-2.5 bg-white border border-gray-200 rounded-lg text-gray-900 focus:ring-2 focus:ring-primary/20 focus:border-primary focus:outline-none transition-all placeholder:text-gray-300;
   }
-  
+
   .form-textarea {
     @apply w-full px-4 py-3 bg-white border border-gray-200 rounded-lg text-gray-900 focus:ring-2 focus:ring-primary/20 focus:border-primary focus:outline-none transition-all placeholder:text-gray-300 resize-y min-h-[100px];
+  }
+
+  /* Diagonal Stripe Pattern for Blocked/Unavailable Time Slots */
+  .diagonal-stripes {
+    background-image: repeating-linear-gradient(
+      45deg,
+      transparent,
+      transparent 10px,
+      rgba(156, 163, 175, 0.15) 10px,
+      rgba(156, 163, 175, 0.15) 20px
+    );
+    position: relative;
+  }
+
+  /* Alternative: Thicker stripes for better visibility */
+  .diagonal-stripes-thick {
+    background-image: repeating-linear-gradient(
+      45deg,
+      transparent,
+      transparent 8px,
+      rgba(156, 163, 175, 0.25) 8px,
+      rgba(156, 163, 175, 0.25) 16px
+    );
+  }
+
+  /* Shadow lift effect for draggable elements */
+  .draggable-shadow {
+    @apply transition-shadow duration-200;
+  }
+
+  .draggable-shadow:hover {
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+  }
+
+  /* Pulse animation for current time indicator */
+  @keyframes pulse-slow {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.7;
+    }
+  }
+
+  .pulse-slow {
+    animation: pulse-slow 2s ease-in-out infinite;
+  }
+}
+
+@layer utilities {
+  /* Hide scrollbar but keep functionality */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Smooth scroll behavior */
+  .scroll-smooth {
+    scroll-behavior: smooth;
+  }
+
+  /* Fade in animation */
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-fade-in {
+    animation: fade-in 0.3s ease-out;
+  }
+
+  /* Calendar grid helper */
+  .calendar-grid-line {
+    @apply border-b border-gray-100 relative;
+  }
+
+  .calendar-grid-line:nth-child(even) {
+    @apply bg-gray-50/30;
   }
 }
 
@@ -6183,6 +7328,7 @@ export const BookingStatus = {
   CONFIRMED: 'CONFIRMED',
   CANCELLED: 'CANCELLED',
   COMPLETED: 'COMPLETED',
+  BLOCKED: 'BLOCKED',
 } as const;
 
 export type BookingStatus = typeof BookingStatus[keyof typeof BookingStatus];
@@ -6192,6 +7338,7 @@ export const PaymentStatus = {
   PAID: 'PAID',
   FAILED: 'FAILED',
   REFUNDED: 'REFUNDED',
+  NOT_REQUIRED: 'NOT_REQUIRED',
 } as const;
 
 export type PaymentStatus = typeof PaymentStatus[keyof typeof PaymentStatus];
@@ -6241,6 +7388,8 @@ export interface Service {
   shortDescription: string | null;
   durationMinutes: number;
   price: number;
+  offerPrice: number | null;
+  isOffer: boolean;
   categoryId: number | null;
   categoryName: string | null;
   isFeatured: boolean;
@@ -6257,6 +7406,7 @@ export interface Product {
   description: string;
   shortDescription: string | null;
   price: number;
+  offerPrice: number | null;
   stock: number;
   categoryId: number | null;
   categoryName: string | null;
@@ -6461,4 +7611,40 @@ export interface DaySchedule {
 export interface WeeklySchedule {
   [key: string]: DaySchedule; // monday, tuesday, etc.
 }
+
+========== FILE: ./utils/imageUtils.ts ==========
+/**
+ * Utility functions for handling image URLs
+ */
+
+/**
+ * Resolves image URLs to absolute paths
+ * - If the path starts with /api or /uploads, prepends the API base URL
+ * - If it's already an absolute URL (http/https), returns it as-is
+ * - Otherwise, returns the path unchanged
+ *
+ * @param path - The image path to resolve
+ * @returns The resolved absolute URL
+ */
+export function resolveImageUrl(path: string | null | undefined): string {
+  // Return empty string for null/undefined
+  if (!path) {
+    return '';
+  }
+
+  // Already an absolute URL (http:// or https://)
+  if (path.startsWith('http://') || path.startsWith('https://')) {
+    return path;
+  }
+
+  // Relative API paths need the base URL prepended
+  if (path.startsWith('/api') || path.startsWith('/uploads')) {
+    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080';
+    return `${baseUrl}${path}`;
+  }
+
+  // For other paths (like public assets /placeholder.jpg), return as-is
+  return path;
+}
+
 

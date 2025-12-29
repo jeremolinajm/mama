@@ -2,6 +2,7 @@ package com.flavia.dermobeauty.booking.domain;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -49,5 +50,14 @@ public interface BookingRepository {
     List<Booking> findByStatus(BookingStatus status);
 
     List<Booking> findByDate(LocalDate date);
+
+    /**
+     * Find bookings within a date range for calendar display.
+     * @param from start of range (inclusive)
+     * @param to end of range (inclusive)
+     * @param includeCancelled if true, includes cancelled bookings
+     * @return list of bookings in range
+     */
+    List<Booking> findByDateRange(OffsetDateTime from, OffsetDateTime to, boolean includeCancelled);
 
 }

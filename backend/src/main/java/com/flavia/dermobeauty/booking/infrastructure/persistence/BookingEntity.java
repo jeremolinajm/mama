@@ -9,6 +9,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 
 /**
  * JPA entity for bookings table.
@@ -34,6 +35,10 @@ public class BookingEntity {
     @Column(name = "service_id", nullable = false)
     private Long serviceId;
 
+    // Service name snapshot (immutable)
+    @Column(name = "service_name", length = 200)
+    private String serviceName;
+
     // Customer information (embedded fields)
     @Column(name = "customer_name", nullable = false, length = 200)
     private String customerName;
@@ -47,12 +52,16 @@ public class BookingEntity {
     @Column(name = "customer_comments", columnDefinition = "TEXT")
     private String customerComments;
 
-    // Time slot (embedded fields)
+    // Time slot (legacy fields - kept for backward compatibility)
     @Column(name = "booking_date", nullable = false)
     private LocalDate bookingDate;
 
     @Column(name = "booking_time", nullable = false)
     private LocalTime bookingTime;
+
+    // New datetime field with timezone
+    @Column(name = "start_at", nullable = false, columnDefinition = "TIMESTAMPTZ")
+    private OffsetDateTime startAt;
 
     @Column(name = "duration_minutes", nullable = false)
     private Integer durationMinutes;

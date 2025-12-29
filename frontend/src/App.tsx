@@ -23,7 +23,8 @@ import AdminServiciosPage from './pages/admin/AdminServiciosPage';
 import AdminProductosPage from './pages/admin/AdminProductosPage';
 import AdminTurnosPage from './pages/admin/AdminTurnosPage';
 import AdminPedidosPage from './pages/admin/AdminPedidosPage';
-import AdminConfigPage from './pages/admin/AdminConfigPage'; 
+import AdminConfigPage from './pages/admin/AdminConfigPage';
+import AdminCategoriasPage from './pages/admin/AdminCategoriasPage';
 import PaymentFailurePage from './pages/PaymentFailurePage';
 import PaymentSuccessPage from './pages/PaymentSuccessPage';
 
@@ -66,6 +67,7 @@ function App() {
               <Route path="productos" element={<AdminProductosPage />} />
               <Route path="turnos" element={<AdminTurnosPage />} />
               <Route path="pedidos" element={<AdminPedidosPage />} />
+              <Route path="categorias" element={<AdminCategoriasPage />} />
               <Route path="config" element={<AdminConfigPage />} />
             </Route>
           </Routes>

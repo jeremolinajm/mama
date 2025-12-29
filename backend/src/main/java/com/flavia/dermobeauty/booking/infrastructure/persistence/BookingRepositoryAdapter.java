@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -75,6 +76,17 @@ public class BookingRepositoryAdapter implements BookingRepository {
     public List<Booking> findByStatus(BookingStatus status) {
         return jpaRepository.findByStatus(status)
                 .stream()
+                .map(mapper::toDomain)
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<Booking> findByDateRange(OffsetDateTime from, OffsetDateTime to, boolean includeCancelled) {
+        List<BookingEntity> entities = includeCancelled
+                ? jpaRepository.findByDateRangeAll(from, to)
+                : jpaRepository.findByDateRangeExcludingCancelled(from, to);
+
+        return entities.stream()
                 .map(mapper::toDomain)
                 .collect(Collectors.toList());
     }
