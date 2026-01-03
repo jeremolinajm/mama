@@ -2,8 +2,6 @@ package com.flavia.dermobeauty.sales.web;
 
 import com.flavia.dermobeauty.booking.application.usecase.CancelBookingUseCase;
 import com.flavia.dermobeauty.booking.application.usecase.ListBookingsUseCase;
-import com.flavia.dermobeauty.booking.application.usecase.RescheduleBookingUseCase;
-import com.flavia.dermobeauty.booking.domain.Booking;
 import com.flavia.dermobeauty.booking.web.dto.BookingResponse;
 import com.flavia.dermobeauty.sales.application.usecase.ListOrdersUseCase;
 import com.flavia.dermobeauty.sales.application.usecase.UpdateOrderStatusUseCase;
@@ -20,9 +18,6 @@ import org.springframework.data.domain.Sort;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.time.LocalDateTime;
-import java.time.OffsetDateTime;
-import java.time.ZoneId;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -31,11 +26,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class AdminOperationsController {
 
-    private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
-
     private final ListBookingsUseCase listBookingsUseCase;
     private final CancelBookingUseCase cancelBookingUseCase;
-    private final RescheduleBookingUseCase rescheduleBookingUseCase;
     private final ListOrdersUseCase listOrdersUseCase;
     private final UpdateOrderStatusUseCase updateOrderStatusUseCase;
 
@@ -53,19 +45,6 @@ public class AdminOperationsController {
     public ResponseEntity<ApiResponse<Void>> cancelBooking(@PathVariable Long id) {
         cancelBookingUseCase.execute(id);
         return ResponseEntity.ok(ApiResponse.success("Turno cancelado"));
-    }
-
-    @PatchMapping("/bookings/{id}/reschedule")
-    public ResponseEntity<ApiResponse<BookingResponse>> rescheduleBooking(
-            @PathVariable Long id,
-            @RequestBody RescheduleRequest request) {
-        // Convert LocalDate + LocalTime to OffsetDateTime
-        OffsetDateTime newStartAt = LocalDateTime.of(request.getBookingDate(), request.getBookingTime())
-                .atZone(ARGENTINA_ZONE)
-                .toOffsetDateTime();
-
-        Booking updated = rescheduleBookingUseCase.execute(id, newStartAt);
-        return ResponseEntity.ok(ApiResponse.success(BookingResponse.fromDomain(updated)));
     }
 
     // ==================== ORDERS ====================
@@ -92,11 +71,5 @@ public class AdminOperationsController {
     @Data
     public static class UpdateStatusRequest {
         private OrderStatus status;
-    }
-
-    @Data
-    public static class RescheduleRequest {
-        private java.time.LocalDate bookingDate;
-        private java.time.LocalTime bookingTime;
     }
 }

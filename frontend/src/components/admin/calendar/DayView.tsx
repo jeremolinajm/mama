@@ -1,13 +1,15 @@
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import BookingCard from './BookingCard';
 import BlockCard from './BlockCard';
 import type { CalendarEvent, CalendarBookingEvent, CalendarBlockEvent } from '../../../types/domain';
+import { type WeeklySchedule, getDayHours } from '../../../api/config';
 
 interface DayViewProps {
   currentDate: Date;
   events: CalendarEvent[];
+  schedule: WeeklySchedule;
   onBookingClick?: (event: CalendarBookingEvent) => void;
   onSlotClick?: (time: string) => void;
   onBlockCancel?: (id: number) => void;
@@ -19,12 +21,11 @@ interface DayViewProps {
 }
 
 const HOUR_HEIGHT_PX = 66;
-const START_HOUR = 9;
-const END_HOUR = 20;
 
 export default function DayView({
   currentDate,
   events,
+  schedule,
   onBookingClick,
   onSlotClick,
   onBlockCancel,
@@ -43,6 +44,11 @@ export default function DayView({
     }, 60000);
     return () => clearInterval(interval);
   }, []);
+
+  // Get hours from schedule for this day
+  const dayHours = useMemo(() => getDayHours(currentDate, schedule), [currentDate, schedule]);
+  const START_HOUR = dayHours ? parseInt(dayHours.startTime.split(':')[0]) : 9;
+  const END_HOUR = dayHours ? parseInt(dayHours.endTime.split(':')[0]) : 20;
 
   // Generate hours array
   const hours = Array.from({ length: END_HOUR - START_HOUR + 1 }, (_, i) => i + START_HOUR);
@@ -88,12 +94,40 @@ export default function DayView({
     return (durationMinutes / 60) * HOUR_HEIGHT_PX;
   };
 
-  // Calculate time from Y position (snapped to 30 min)
+  // Calculate time from Y position (snapped to 30 min, clamped to business hours)
   const positionToTime = (yPosition: number): string => {
     const totalMinutes = (yPosition / HOUR_HEIGHT_PX) * 60;
-    const hours = Math.floor(totalMinutes / 60) + START_HOUR;
-    const minutes = Math.round((totalMinutes % 60) / 30) * 30;
+    let hours = Math.floor(totalMinutes / 60) + START_HOUR;
+    let minutes = Math.round((totalMinutes % 60) / 30) * 30;
+
+    // Handle 60 minutes rollover
+    if (minutes === 60) {
+      hours += 1;
+      minutes = 0;
+    }
+
+    // Clamp to business hours
+    if (hours < START_HOUR) {
+      hours = START_HOUR;
+      minutes = 0;
+    }
+    if (hours > END_HOUR || (hours === END_HOUR && minutes > 0)) {
+      hours = END_HOUR;
+      minutes = 0;
+    }
+
     return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+  };
+
+  // Check if time is within business hours
+  const isWithinBusinessHours = (time: string, durationMinutes: number): boolean => {
+    const [h, m] = time.split(':').map(Number);
+    const startMinutes = h * 60 + m;
+    const endMinutes = startMinutes + durationMinutes;
+    const businessStart = START_HOUR * 60;
+    const businessEnd = END_HOUR * 60;
+
+    return startMinutes >= businessStart && endMinutes <= businessEnd;
   };
 
   // Build ISO datetime from time string
@@ -132,6 +166,11 @@ export default function DayView({
     const yPosition = e.clientY - rect.top;
     const time = positionToTime(yPosition);
 
+    // Validate the time is within business hours (assume 30 min default slot)
+    if (!isWithinBusinessHours(time, 30)) {
+      return;
+    }
+
     onSlotClick(time);
   };
 
@@ -155,6 +194,11 @@ export default function DayView({
     const end = new Date(draggingEvent.endAt);
     const durationMinutes = (end.getTime() - start.getTime()) / (1000 * 60);
 
+    // Check if within business hours
+    if (!isWithinBusinessHours(newTime, durationMinutes)) {
+      return; // Outside business hours, reject silently
+    }
+
     // Check for collisions
     if (hasCollision(newTime, durationMinutes, draggingEvent.id)) {
       return; // Collision will be handled by parent with toast
@@ -166,6 +210,9 @@ export default function DayView({
 
   const bookingCount = bookingEvents.filter(e => e.status !== 'CANCELLED').length;
   const blockCount = blockEvents.filter(e => e.status !== 'CANCELLED').length;
+
+  // Calculate grid height based on business hours
+  const gridHeight = hours.length * HOUR_HEIGHT_PX;
 
   return (
     <div className="bg-white rounded-3xl shadow-soft overflow-hidden border border-gray-100 flex flex-col h-[700px]">
@@ -188,7 +235,7 @@ export default function DayView({
 
       {/* Calendar Grid */}
       <div className="flex-1 overflow-y-auto relative">
-        <div className="flex min-h-[900px]">
+        <div className="flex" style={{ minHeight: `${gridHeight}px` }}>
           {/* Time Column */}
           <div className="w-20 border-r border-gray-200 bg-gray-50/80 flex-shrink-0 sticky left-0 z-10">
             {hours.map((hour) => (

@@ -6,13 +6,10 @@ import { DeliveryType } from '../types/domain';
 import type { CreateOrderRequest } from '../types/domain';
 import { resolveImageUrl } from '../utils/imageUtils';
 
-// Costo de envío fijo (Debería venir del backend, pero lo dejamos visual por ahora)
-const DELIVERY_COST = 1500; 
-
 export default function CarritoPage() {
   const { items, subtotal, updateQuantity, removeItem, clearCart } = useCart();
   const [loading, setLoading] = useState(false);
-  
+
   // Estado del Formulario
   const [formData, setFormData] = useState({
     name: '',
@@ -24,12 +21,10 @@ export default function CarritoPage() {
     postalCode: '',
     comments: ''
   });
-  
+
   const [deliveryType, setDeliveryType] = useState<DeliveryType>('PICKUP');
 
-  // Cálculos
-  const shippingCost = deliveryType === 'HOME_DELIVERY' ? DELIVERY_COST : 0;
-  const total = subtotal + shippingCost;
+  const total = subtotal; // El envío se define manualmente después del pago
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -212,9 +207,14 @@ export default function CarritoPage() {
                     }`}
                   >
                     Envío a Domicilio
-                    <span className="block text-xs font-normal mt-1">+${DELIVERY_COST}</span>
+                    <span className="block text-xs font-normal mt-1">A coordinar</span>
                   </button>
                 </div>
+                {deliveryType === 'HOME_DELIVERY' && (
+                  <p className="text-xs text-amber-600 mt-2 bg-amber-50 p-2 rounded-lg">
+                    El costo del envío se coordina por WhatsApp según tu ubicación.
+                  </p>
+                )}
               </div>
 
               {/* DIRECCIÓN (Condicional) */}
@@ -246,13 +246,21 @@ export default function CarritoPage() {
                   <span>Subtotal</span>
                   <span>${subtotal}</span>
                 </div>
-                <div className="flex justify-between text-gray-500">
-                  <span>Envío</span>
-                  <span>{shippingCost === 0 ? 'Gratis' : `$${shippingCost}`}</span>
-                </div>
+                {deliveryType === 'HOME_DELIVERY' && (
+                  <div className="flex justify-between text-gray-500">
+                    <span>Envío</span>
+                    <span className="text-amber-600 font-medium">A definir</span>
+                  </div>
+                )}
+                {deliveryType === 'PICKUP' && (
+                  <div className="flex justify-between text-gray-500">
+                    <span>Envío</span>
+                    <span className="text-green-600 font-medium">Gratis (retiro)</span>
+                  </div>
+                )}
                 <div className="flex justify-between text-xl font-bold text-primary pt-2">
                   <span>Total</span>
-                  <span>${total}</span>
+                  <span>${total}{deliveryType === 'HOME_DELIVERY' && <span className="text-sm font-normal text-gray-400"> + envío</span>}</span>
                 </div>
               </div>
 

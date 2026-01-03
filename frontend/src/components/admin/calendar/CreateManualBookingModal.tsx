@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { X, User, Phone, Mail, FileText, Calendar, Clock } from 'lucide-react';
-import { format } from 'date-fns';
+import { format, parseISO } from 'date-fns';
 import { serviciosApi } from '../../../api/servicios';
 import { turnosApi } from '../../../api/turnos';
+import { type WeeklySchedule, getDayHours, isDayEnabled } from '../../../api/config';
 import type { Service, CreateBookingRequest } from '../../../types/domain';
 
 interface CreateManualBookingModalProps {
@@ -11,6 +12,7 @@ interface CreateManualBookingModalProps {
   onSuccess: () => void;
   initialDate?: Date;
   initialTime?: string;
+  schedule?: WeeklySchedule | null;
 }
 
 export default function CreateManualBookingModal({
@@ -19,6 +21,7 @@ export default function CreateManualBookingModal({
   onSuccess,
   initialDate = new Date(),
   initialTime = '09:00',
+  schedule = null,
 }: CreateManualBookingModalProps) {
   const [services, setServices] = useState<Service[]>([]);
   const [loading, setLoading] = useState(true);
@@ -26,6 +29,25 @@ export default function CreateManualBookingModal({
   const [selectedServiceId, setSelectedServiceId] = useState<number | null>(null);
   const [date, setDate] = useState(format(initialDate, 'yyyy-MM-dd'));
   const [time, setTime] = useState(initialTime);
+
+  // Get day hours from schedule for the selected date
+  const selectedDate = useMemo(() => {
+    try {
+      return parseISO(date);
+    } catch {
+      return new Date();
+    }
+  }, [date]);
+
+  const dayHours = useMemo(() => {
+    if (!schedule) return { startTime: '09:00', endTime: '19:00' };
+    return getDayHours(selectedDate, schedule) || { startTime: '09:00', endTime: '19:00' };
+  }, [selectedDate, schedule]);
+
+  const selectedDayEnabled = useMemo(() => {
+    if (!schedule) return true;
+    return isDayEnabled(selectedDate, schedule);
+  }, [selectedDate, schedule]);
 
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
@@ -59,11 +81,13 @@ export default function CreateManualBookingModal({
 
   const selectedService = services.find((s) => s.id === selectedServiceId);
 
-  // Generate time slots (09:00 - 20:00 every 30 min)
+  // Generate time slots dynamically based on schedule
+  const startHour = parseInt(dayHours.startTime.split(':')[0]);
+  const endHour = parseInt(dayHours.endTime.split(':')[0]);
   const timeSlots: string[] = [];
-  for (let h = 9; h <= 20; h++) {
+  for (let h = startHour; h <= endHour; h++) {
     timeSlots.push(`${h.toString().padStart(2, '0')}:00`);
-    if (h < 20) {
+    if (h < endHour) {
       timeSlots.push(`${h.toString().padStart(2, '0')}:30`);
     }
   }
@@ -180,6 +204,7 @@ export default function CreateManualBookingModal({
                 onChange={(e) => setTime(e.target.value)}
                 className="w-full border border-gray-300 rounded-xl p-3 focus:ring-2 focus:ring-accent focus:border-accent"
                 required
+                disabled={!selectedDayEnabled}
               >
                 {timeSlots.map((slot) => (
                   <option key={slot} value={slot}>
@@ -189,6 +214,13 @@ export default function CreateManualBookingModal({
               </select>
             </div>
           </div>
+
+          {/* Day not enabled warning */}
+          {!selectedDayEnabled && (
+            <div className="bg-amber-50 text-amber-700 px-4 py-3 rounded-xl text-sm">
+              El día seleccionado no está habilitado en la configuración de horarios.
+            </div>
+          )}
 
           {/* Service Info */}
           {selectedService && (
@@ -277,7 +309,7 @@ export default function CreateManualBookingModal({
           {/* Submit Button */}
           <button
             type="submit"
-            disabled={submitting || !selectedServiceId}
+            disabled={submitting || !selectedServiceId || !selectedDayEnabled}
             className="w-full bg-accent text-white py-3 rounded-xl font-bold hover:bg-accent-dark transition-colors disabled:opacity-50"
           >
             {submitting ? 'Creando...' : 'Crear Turno'}

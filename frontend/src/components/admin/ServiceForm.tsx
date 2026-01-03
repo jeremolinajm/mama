@@ -95,21 +95,51 @@ export default function ServiceForm({ service, onSubmit, onCancel }: ServiceForm
         />
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Precio *</label>
-          <input
-            type="number"
-            value={formData.price}
-            onChange={(e) => { 
-              const val = parseFloat(e.target.value);
-              setFormData({ ...formData, price: isNaN(val) ? 0 : val })}
-            }
-            min="0"
-            step="0.01"
-            className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
-            required
-          />
+          <div className="relative">
+            <span className="absolute left-3 top-2 text-gray-500">$</span>
+            <input
+              type="number"
+              value={formData.price}
+              onChange={(e) => {
+                const val = parseFloat(e.target.value);
+                setFormData({ ...formData, price: isNaN(val) ? 0 : val })}
+              }
+              min="0"
+              step="0.01"
+              className="w-full px-4 py-2 pl-8 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
+              required
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Precio Oferta
+          </label>
+          <div className="relative">
+            <span className="absolute left-3 top-2 text-gray-500">$</span>
+            <input
+              type="number"
+              value={formData.offerPrice || ''}
+              onChange={(e) => {
+                const val = parseFloat(e.target.value);
+                const offerPrice = isNaN(val) || val <= 0 ? null : val;
+                setFormData({
+                  ...formData,
+                  offerPrice,
+                  isOffer: offerPrice !== null && offerPrice > 0
+                });
+              }}
+              min="0"
+              step="0.01"
+              placeholder="Opcional"
+              className="w-full px-4 py-2 pl-8 border border-orange-200 bg-orange-50 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-200 focus:border-orange-400"
+            />
+          </div>
+          <p className="text-xs text-orange-600 mt-1">Si se establece, aparecerá el badge de oferta</p>
         </div>
 
         <div>
@@ -171,16 +201,6 @@ export default function ServiceForm({ service, onSubmit, onCancel }: ServiceForm
         <label className="flex items-center gap-3 cursor-pointer">
           <input
             type="checkbox"
-            checked={formData.isOffer}
-            onChange={(e) => setFormData({ ...formData, isOffer: e.target.checked })}
-            className="w-5 h-5 text-primary rounded focus:ring-primary border-gray-300"
-          />
-          <span className="text-sm text-gray-700 font-medium">En oferta</span>
-        </label>
-
-        <label className="flex items-center gap-3 cursor-pointer">
-          <input
-            type="checkbox"
             checked={formData.isActive}
             onChange={(e) => setFormData({ ...formData, isActive: e.target.checked })}
             className="w-5 h-5 text-green-600 rounded focus:ring-green-500 border-gray-300"
@@ -188,29 +208,6 @@ export default function ServiceForm({ service, onSubmit, onCancel }: ServiceForm
           <span className="text-sm text-gray-700 font-medium">Servicio Activo</span>
         </label>
       </div>
-
-      {/* Precio de Oferta (condicional) */}
-      {formData.isOffer && (
-        <div className="animate-fade-in">
-          <label className="block text-sm font-bold text-gray-700 mb-1">Precio de Oferta</label>
-          <div className="relative">
-            <span className="absolute left-3 top-2 text-gray-500">$</span>
-            <input
-              type="number"
-              value={formData.offerPrice || ''}
-              onChange={(e) => {
-                const val = parseFloat(e.target.value);
-                setFormData({ ...formData, offerPrice: isNaN(val) ? null : val });
-              }}
-              min="0"
-              step="0.01"
-              placeholder="Precio con descuento"
-              className="w-full px-4 py-2 pl-8 border border-orange-200 bg-orange-50 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-200 focus:border-orange-400"
-            />
-          </div>
-          <p className="text-xs text-orange-600 mt-1">Este precio se mostrará como oferta en lugar del precio normal</p>
-        </div>
-      )}
 
       <div className="flex gap-3 pt-4 border-t">
         <button

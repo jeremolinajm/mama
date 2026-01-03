@@ -11,7 +11,6 @@ import type {
   CalendarEvent,
   Block,
   BookingHistoryEntry,
-  ApiResponse,
 } from '../types/domain';
 
 // Spring Page response type
@@ -145,10 +144,10 @@ export const adminApi = {
         to,
         includeCancelled: includeCancelled.toString(),
       });
-      const response = await apiClient.get<ApiResponse<CalendarEvent[]>>(
+      const response = await apiClient.get<CalendarEvent[]>(
         `/api/admin/calendar?${params.toString()}`
       );
-      return response.data.data;
+      return response.data;
     },
   },
 
@@ -162,21 +161,21 @@ export const adminApi = {
       endAt: string;
       reason: string;
     }): Promise<Block> => {
-      const response = await apiClient.post<ApiResponse<Block>>(
+      const response = await apiClient.post<Block>(
         '/api/admin/blocks',
         request
       );
-      return response.data.data;
+      return response.data;
     },
 
     /**
      * Cancel a block
      */
     cancel: async (id: number): Promise<Block> => {
-      const response = await apiClient.patch<ApiResponse<Block>>(
+      const response = await apiClient.patch<Block>(
         `/api/admin/blocks/${id}/cancel`
       );
-      return response.data.data;
+      return response.data;
     },
   },
 
@@ -213,11 +212,11 @@ export const adminApi = {
      * @param newStartAt New start time (ISO DateTime)
      */
     reschedule: async (id: number, newStartAt: string): Promise<Booking> => {
-      const response = await apiClient.patch<ApiResponse<Booking>>(
+      const response = await apiClient.patch<Booking>(
         `/api/admin/bookings/${id}/reschedule`,
         { newStartAt }
       );
-      return response.data.data;
+      return response.data;
     },
 
     /**
@@ -232,21 +231,21 @@ export const adminApi = {
         comments: string | null;
       }
     ): Promise<Booking> => {
-      const response = await apiClient.patch<ApiResponse<Booking>>(
+      const response = await apiClient.patch<Booking>(
         `/api/admin/bookings/${id}/customer`,
         customer
       );
-      return response.data.data;
+      return response.data;
     },
 
     /**
      * Get booking history (audit trail)
      */
     getHistory: async (id: number): Promise<BookingHistoryEntry[]> => {
-      const response = await apiClient.get<ApiResponse<BookingHistoryEntry[]>>(
+      const response = await apiClient.get<BookingHistoryEntry[]>(
         `/api/admin/bookings/${id}/history`
       );
-      return response.data.data;
+      return response.data;
     },
   },
 

@@ -34,10 +34,11 @@ public interface BookingRepository {
     Optional<Booking> findByMercadoPagoPaymentId(String paymentId);
 
     /**
-     * Check if a slot is already booked for a service.
-     * Returns true if there's an active (non-cancelled) booking for this slot.
+     * Check if a slot is available (no overlapping bookings).
+     * Global check - single resource model (Flavia handles all services).
+     * Returns true if the slot is free.
      */
-    boolean isTimeSlotAvailable(Long serviceId, LocalDate date, LocalTime startTime, LocalTime endTime);
+    boolean isTimeSlotAvailable(LocalDate date, LocalTime startTime, LocalTime endTime);
 
     /**
      * Find all bookings (for admin).

@@ -9,8 +9,6 @@ services:
       POSTGRES_DB: dermobeauty_dev
       POSTGRES_USER: dermobeauty
       POSTGRES_PASSWORD: dermobeauty
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

@@ -18,8 +18,11 @@ import org.springframework.context.annotation.Configuration;
 public class BookingConfig {
 
     @Bean
-    public CreateBookingUseCase createBookingUseCase(BookingRepository bookingRepository) {
-        return new CreateBookingUseCase(bookingRepository);
+    public CreateBookingUseCase createBookingUseCase(
+            BookingRepository bookingRepository,
+            BlockRepository blockRepository
+    ) {
+        return new CreateBookingUseCase(bookingRepository, blockRepository);
     }
 
     @Bean

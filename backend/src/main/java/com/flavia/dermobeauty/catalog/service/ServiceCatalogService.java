@@ -55,6 +55,15 @@ public class ServiceCatalogService {
     }
 
     @Transactional(readOnly = true)
+    public List<ServiceDto> getOffers() {
+        log.debug("Fetching services on offer");
+        return serviceRepository.findByIsOfferTrueAndIsActiveTrueOrderByCreatedAtDesc()
+                .stream()
+                .map(ServiceDto::fromEntity)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
     public ServiceDto getById(Long id) {
         log.debug("Fetching service by id: {}", id);
         ServiceEntity entity = serviceRepository.findById(id)

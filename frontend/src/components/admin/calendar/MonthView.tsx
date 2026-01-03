@@ -7,21 +7,62 @@ import {
   isSameDay,
   isToday
 } from 'date-fns';
+import { Lock } from 'lucide-react';
 import type { CalendarEvent, CalendarBookingEvent, CalendarBlockEvent } from '../../../types/domain';
+import { type WeeklySchedule, isDayEnabled, getDayHours } from '../../../api/config';
 
 interface MonthViewProps {
   currentDate: Date;
   events: CalendarEvent[];
+  schedule: WeeklySchedule;
   onDaySelect: (date: Date) => void;
 }
 
-export default function MonthView({ currentDate, events, onDaySelect }: MonthViewProps) {
+export default function MonthView({ currentDate, events, schedule, onDaySelect }: MonthViewProps) {
   const monthStart = startOfMonth(currentDate);
   const monthEnd = endOfMonth(currentDate);
   const days = eachDayOfInterval({ start: monthStart, end: monthEnd });
   const startDay = getDay(monthStart);
 
   const weekDays = ['Domingo', 'Lunes', 'Martes', 'Miercoles', 'Jueves', 'Viernes', 'Sabado'];
+
+  // Helper function to check if a day is fully blocked
+  const isDayFullyBlocked = (day: Date, blocks: CalendarBlockEvent[]): boolean => {
+    if (blocks.length === 0) return false;
+
+    const hours = getDayHours(day, schedule);
+    if (!hours) return false;
+
+    // Calculate total working minutes
+    const [startH, startM] = hours.startTime.split(':').map(Number);
+    const [endH, endM] = hours.endTime.split(':').map(Number);
+    const totalWorkMinutes = (endH * 60 + endM) - (startH * 60 + startM);
+
+    // Calculate total blocked minutes
+    let totalBlockedMinutes = 0;
+    for (const block of blocks) {
+      const blockStart = new Date(block.startAt);
+      const blockEnd = new Date(block.endAt);
+
+      // Get block start/end as minutes from midnight
+      const blockStartMinutes = blockStart.getHours() * 60 + blockStart.getMinutes();
+      const blockEndMinutes = blockEnd.getHours() * 60 + blockEnd.getMinutes();
+
+      // Clamp to work hours
+      const workStartMinutes = startH * 60 + startM;
+      const workEndMinutes = endH * 60 + endM;
+
+      const effectiveStart = Math.max(blockStartMinutes, workStartMinutes);
+      const effectiveEnd = Math.min(blockEndMinutes, workEndMinutes);
+
+      if (effectiveEnd > effectiveStart) {
+        totalBlockedMinutes += effectiveEnd - effectiveStart;
+      }
+    }
+
+    // Consider "fully blocked" if 90%+ of the day is blocked
+    return totalBlockedMinutes >= totalWorkMinutes * 0.9;
+  };
 
   return (
     <div className="bg-white rounded-3xl shadow-soft overflow-hidden animate-fade-in border border-gray-100">
@@ -42,6 +83,9 @@ export default function MonthView({ currentDate, events, onDaySelect }: MonthVie
         ))}
 
         {days.map((day) => {
+          // Check if day is enabled
+          const dayEnabled = isDayEnabled(day, schedule);
+
           // Filter events for this day
           const dayEvents = events.filter(e => {
             const eventDate = new Date(e.startAt);
@@ -55,7 +99,49 @@ export default function MonthView({ currentDate, events, onDaySelect }: MonthVie
             e.type === 'BLOCK' && e.status !== 'CANCELLED'
           );
 
-          const hasBlocks = blockEvents.length > 0;
+          const fullyBlocked = dayEnabled && isDayFullyBlocked(day, blockEvents);
+          const hasPartialBlocks = blockEvents.length > 0 && !fullyBlocked;
+
+          // Disabled day (not in schedule)
+          if (!dayEnabled) {
+            return (
+              <div
+                key={day.toString()}
+                className="border-b border-r border-gray-100 p-2 bg-gray-100/50 cursor-not-allowed"
+              >
+                <div className="flex justify-between items-start">
+                  <span className="w-7 h-7 flex items-center justify-center rounded-full text-sm font-medium text-gray-400">
+                    {format(day, 'd')}
+                  </span>
+                  <span className="text-[10px] text-gray-400 italic">Cerrado</span>
+                </div>
+              </div>
+            );
+          }
+
+          // Fully blocked day
+          if (fullyBlocked) {
+            return (
+              <div
+                key={day.toString()}
+                onClick={() => onDaySelect(day)}
+                className="border-b border-r border-gray-100 p-2 bg-gray-200/60 cursor-pointer hover:bg-gray-200 transition-all"
+              >
+                <div className="flex justify-between items-start">
+                  <span className={`
+                    w-7 h-7 flex items-center justify-center rounded-full text-sm font-bold
+                    ${isToday(day) ? 'bg-accent text-white' : 'text-gray-600'}
+                  `}>
+                    {format(day, 'd')}
+                  </span>
+                </div>
+                <div className="mt-4 flex flex-col items-center justify-center text-gray-500">
+                  <Lock size={20} className="mb-1" />
+                  <span className="text-xs font-medium">Bloqueado</span>
+                </div>
+              </div>
+            );
+          }
 
           return (
             <div
@@ -63,7 +149,7 @@ export default function MonthView({ currentDate, events, onDaySelect }: MonthVie
               onClick={() => onDaySelect(day)}
               className={`border-b border-r border-gray-100 p-2 transition-all cursor-pointer hover:bg-accent/5 group relative
                 ${isToday(day) ? 'bg-accent/5' : ''}
-                ${hasBlocks ? 'bg-gray-50' : ''}
+                ${hasPartialBlocks ? 'bg-gray-50' : ''}
               `}
             >
               <div className="flex justify-between items-start">
@@ -74,7 +160,7 @@ export default function MonthView({ currentDate, events, onDaySelect }: MonthVie
                   {format(day, 'd')}
                 </span>
                 <div className="flex gap-1">
-                  {hasBlocks && (
+                  {hasPartialBlocks && (
                     <span className="text-[10px] bg-gray-200 px-1.5 py-0.5 rounded text-gray-600 font-medium">
                       {blockEvents.length} bloq
                     </span>

@@ -60,8 +60,8 @@ public class BookingRepositoryAdapter implements BookingRepository {
     }
 
     @Override
-    public boolean isTimeSlotAvailable(Long serviceId, LocalDate date, LocalTime startTime, LocalTime endTime) {
-        return !jpaRepository.existsOverlappingBooking(serviceId, date, startTime, endTime);
+    public boolean isTimeSlotAvailable(LocalDate date, LocalTime startTime, LocalTime endTime) {
+        return !jpaRepository.existsOverlappingBooking(date, startTime, endTime);
     }
 
     @Override

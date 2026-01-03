@@ -52,17 +52,16 @@ export default function ScheduleEditor({ initialSchedule, onSave }: ScheduleEdit
 
   // CORRECCIÓN 2: Tipado estricto en lugar de 'any'
   const handleChange = (dayKey: string, field: keyof DaySchedule, value: string | boolean) => {
-    setSchedule((prev) => ({
-      ...prev,
+    const newSchedule = {
+      ...schedule,
       [dayKey]: {
-        ...prev[dayKey],
+        ...schedule[dayKey],
         [field]: value,
       },
-    }));
-  };
-
-  const handleSave = () => {
-    onSave(JSON.stringify(schedule));
+    };
+    setSchedule(newSchedule);
+    // Sincronizar inmediatamente con el padre
+    onSave(JSON.stringify(newSchedule));
   };
 
   return (
@@ -115,14 +114,9 @@ export default function ScheduleEditor({ initialSchedule, onSave }: ScheduleEdit
         ))}
       </div>
 
-      <div className="mt-6 flex justify-end">
-        <button
-          onClick={handleSave}
-          className="bg-primary text-white px-6 py-2 rounded-lg hover:bg-primary-dark transition shadow-sm"
-        >
-          Guardar Horarios
-        </button>
-      </div>
+      <p className="text-xs text-gray-500 mt-4">
+        Los cambios se guardan con el botón "Guardar" de arriba.
+      </p>
     </div>
   );
 }

@@ -32,7 +32,7 @@ export default function HeroSection() {
               </Link>
               <Link
                 to="/productos"
-                className="bg-white text-primary border border-gray-200 px-8 py-4 rounded-full font-medium hover:border-accent hover:text-accent transition-all duration-300"
+                className="bg-white text-primary border border-gray-200 px-8 py-4 rounded-full font-medium shadow-lg hover:border-accent hover:text-accent hover:-translate-y-1 transition-all duration-300"
               >
                 Ver Productos
               </Link>

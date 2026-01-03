@@ -11,6 +11,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.UUID;
 
 @SuppressWarnings("ClassCanBeRecord")
@@ -21,6 +22,7 @@ public class CreateBookingUseCase {
     private static final ZoneId ARGENTINA_ZONE = ZoneId.of("America/Argentina/Buenos_Aires");
 
     private final BookingRepository bookingRepository;
+    private final BlockRepository blockRepository;
 
     public Booking execute(
             Long serviceId,
@@ -48,8 +50,22 @@ public class CreateBookingUseCase {
         // Calcular hora de fin
         LocalTime bookingEndTime = bookingTime.plusMinutes(durationMinutes);
 
-        // Validar disponibilidad real (rangos de tiempo)
-        if (!bookingRepository.isTimeSlotAvailable(serviceId, bookingDate, bookingTime, bookingEndTime)) {
+        // Calcular OffsetDateTime para verificar bloqueos
+        OffsetDateTime slotStart = LocalDateTime.of(bookingDate, bookingTime)
+                .atZone(ARGENTINA_ZONE).toOffsetDateTime();
+        OffsetDateTime slotEnd = LocalDateTime.of(bookingDate, bookingEndTime)
+                .atZone(ARGENTINA_ZONE).toOffsetDateTime();
+
+        // Verificar que no hay bloqueos activos en ese horario
+        List<Block> activeBlocks = blockRepository.findActiveBlocksInRange(slotStart, slotEnd);
+        if (!activeBlocks.isEmpty()) {
+            throw new ValidationException(
+                    "El horario seleccionado (" + bookingTime + " - " + bookingEndTime + ") está bloqueado."
+            );
+        }
+
+        // Validar disponibilidad (sin bookings solapados - verificación global)
+        if (!bookingRepository.isTimeSlotAvailable(bookingDate, bookingTime, bookingEndTime)) {
             throw new ValidationException(
                     "El horario seleccionado (" + bookingTime + " - " + bookingEndTime + ") no está disponible."
             );

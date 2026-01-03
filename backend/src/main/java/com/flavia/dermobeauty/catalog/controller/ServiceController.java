@@ -32,6 +32,12 @@ public class ServiceController {
         return ResponseEntity.ok(ApiResponse.success(services));
     }
 
+    @GetMapping("/offers")
+    public ResponseEntity<ApiResponse<List<ServiceDto>>> getOfferServices() {
+        List<ServiceDto> services = serviceCatalogService.getOffers();
+        return ResponseEntity.ok(ApiResponse.success(services));
+    }
+
     @GetMapping("/{id}")
     public ResponseEntity<ApiResponse<ServiceDto>> getServiceById(@PathVariable Long id) {
         ServiceDto service = serviceCatalogService.getById(id);

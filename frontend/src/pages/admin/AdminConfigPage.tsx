@@ -300,35 +300,26 @@ export default function AdminConfigPage() {
               {/* --- TAB: STORE --- */}
               {activeTab === 'store' && (
                 <div className="space-y-6 animate-fade-in">
-                  <div className="grid md:grid-cols-2 gap-6">
-                    <InputGroup label="Costo de Envío Fijo ($)" description="Valor único para envíos a domicilio.">
-                      <div className="relative">
-                        <span className="absolute left-3 top-2.5 text-gray-500">$</span>
-                        <input 
-                          type="number" 
-                          value={values['delivery.fixed_cost'] || ''}
-                          onChange={e => handleChange('delivery.fixed_cost', e.target.value)}
-                          className="form-input pl-8" 
-                        />
-                      </div>
-                    </InputGroup>
-
-                    <InputGroup label="Envío GRATIS a partir de ($)" description="Deja en 0 para desactivar.">
-                      <div className="relative">
-                        <span className="absolute left-3 top-2.5 text-gray-500">$</span>
-                        <input 
-                          type="number" 
-                          value={values['delivery.free_threshold'] || '0'}
-                          onChange={e => handleChange('delivery.free_threshold', e.target.value)}
-                          className="form-input pl-8" 
-                        />
-                      </div>
-                    </InputGroup>
+                  <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 flex gap-3 text-amber-800 text-sm">
+                    <AlertCircle size={20} className="flex-shrink-0" />
+                    <p>El costo de envío se calcula manualmente para cada pedido. Puedes configurar un monto a partir del cual el envío es gratis.</p>
                   </div>
+
+                  <InputGroup label="Envío GRATIS a partir de ($)" description="Si el pedido supera este monto, el envío es gratis. Deja en 0 para desactivar.">
+                    <div className="relative">
+                      <span className="absolute left-3 top-2.5 text-gray-500">$</span>
+                      <input
+                        type="number"
+                        value={values['delivery.free_threshold'] || '0'}
+                        onChange={e => handleChange('delivery.free_threshold', e.target.value)}
+                        className="form-input pl-8"
+                      />
+                    </div>
+                  </InputGroup>
 
                   <div className="border-t border-gray-100 pt-6">
                     <InputGroup label="Política de Devolución" description="Texto legal sobre cambios y devoluciones.">
-                      <textarea 
+                      <textarea
                         value={values['policy.returns'] || ''}
                         onChange={e => handleChange('policy.returns', e.target.value)}
                         className="form-textarea"

@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { X, Clock, FileText } from 'lucide-react';
 import { format, addMinutes, parseISO, setHours, setMinutes } from 'date-fns';
+import { type WeeklySchedule, getDayHours } from '../../../api/config';
 
 interface CreateBlockModalProps {
   isOpen: boolean;
@@ -8,15 +9,8 @@ interface CreateBlockModalProps {
   onSubmit: (block: { startAt: string; endAt: string; reason: string }) => Promise<void>;
   initialDate?: Date;
   initialTime?: string;
+  schedule?: WeeklySchedule | null;
 }
-
-const SLOT_OPTIONS = [
-  { label: '30 min', minutes: 30 },
-  { label: '1 hora', minutes: 60 },
-  { label: '2 horas', minutes: 120 },
-  { label: '4 horas', minutes: 240 },
-  { label: 'Todo el dia', minutes: 660 }, // 11 hours (09:00-20:00)
-];
 
 export default function CreateBlockModal({
   isOpen,
@@ -24,6 +18,7 @@ export default function CreateBlockModal({
   onSubmit,
   initialDate = new Date(),
   initialTime = '09:00',
+  schedule = null,
 }: CreateBlockModalProps) {
   const [date, setDate] = useState(format(initialDate, 'yyyy-MM-dd'));
   const [startTime, setStartTime] = useState(initialTime);
@@ -32,13 +27,45 @@ export default function CreateBlockModal({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
+  // Get day hours from schedule for the selected date
+  const selectedDate = useMemo(() => parseISO(date), [date]);
+  const dayHours = useMemo(() => {
+    if (!schedule) return { startTime: '09:00', endTime: '20:00' };
+    return getDayHours(selectedDate, schedule) || { startTime: '09:00', endTime: '20:00' };
+  }, [selectedDate, schedule]);
+
+  // Calculate "Todo el día" duration dynamically
+  const fullDayMinutes = useMemo(() => {
+    const [startH, startM] = dayHours.startTime.split(':').map(Number);
+    const [endH, endM] = dayHours.endTime.split(':').map(Number);
+    return (endH * 60 + endM) - (startH * 60 + startM);
+  }, [dayHours]);
+
+  // Dynamic slot options
+  const slotOptions = useMemo(() => [
+    { label: '30 min', minutes: 30 },
+    { label: '1 hora', minutes: 60 },
+    { label: '2 horas', minutes: 120 },
+    { label: '4 horas', minutes: 240 },
+    { label: 'Todo el dia', minutes: fullDayMinutes, isFullDay: true },
+  ], [fullDayMinutes]);
+
+  // Reset to schedule start time when selecting "Todo el día"
+  useEffect(() => {
+    if (duration === fullDayMinutes) {
+      setStartTime(dayHours.startTime);
+    }
+  }, [duration, fullDayMinutes, dayHours.startTime]);
+
   if (!isOpen) return null;
 
-  // Generate time slots (09:00 - 20:00 every 30 min)
+  // Generate time slots dynamically based on schedule
+  const startHour = parseInt(dayHours.startTime.split(':')[0]);
+  const endHour = parseInt(dayHours.endTime.split(':')[0]);
   const timeSlots: string[] = [];
-  for (let h = 9; h <= 20; h++) {
+  for (let h = startHour; h <= endHour; h++) {
     timeSlots.push(`${h.toString().padStart(2, '0')}:00`);
-    if (h < 20) {
+    if (h < endHour) {
       timeSlots.push(`${h.toString().padStart(2, '0')}:30`);
     }
   }
@@ -142,9 +169,9 @@ export default function CreateBlockModal({
               Duracion
             </label>
             <div className="flex flex-wrap gap-2">
-              {SLOT_OPTIONS.map((option) => (
+              {slotOptions.map((option) => (
                 <button
-                  key={option.minutes}
+                  key={option.label}
                   type="button"
                   onClick={() => setDuration(option.minutes)}
                   className={`

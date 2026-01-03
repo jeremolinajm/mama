@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import { adminApi } from '../../api/admin';
+import { configApi, type WeeklySchedule, isDayEnabled } from '../../api/config';
 import { addDays, subDays, addMonths, subMonths, format, startOfMonth, endOfMonth } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { toast } from 'sonner';
-import { ChevronLeft, ChevronRight, Plus, Lock } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, Lock, AlertCircle } from 'lucide-react';
 import YearView from '../../components/admin/calendar/YearView';
 import MonthView from '../../components/admin/calendar/MonthView';
 import CalendarContainer from '../../components/admin/calendar/CalendarContainer';
@@ -19,6 +20,8 @@ export default function AdminTurnosPage() {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [schedule, setSchedule] = useState<WeeklySchedule | null>(null);
+  const [scheduleLoading, setScheduleLoading] = useState(true);
 
   // Modal states
   const [isBlockModalOpen, setIsBlockModalOpen] = useState(false);
@@ -58,6 +61,23 @@ export default function AdminTurnosPage() {
       setLoading(false);
     }
   }, [currentDate, view]);
+
+  // Load schedule configuration on mount
+  useEffect(() => {
+    const loadSchedule = async () => {
+      try {
+        setScheduleLoading(true);
+        const scheduleData = await configApi.getSchedule();
+        setSchedule(scheduleData);
+      } catch (error) {
+        console.error('Error loading schedule:', error);
+        toast.error('Error al cargar configuración de horarios');
+      } finally {
+        setScheduleLoading(false);
+      }
+    };
+    loadSchedule();
+  }, []);
 
   useEffect(() => {
     loadEvents();
@@ -211,7 +231,7 @@ export default function AdminTurnosPage() {
 
       {/* Calendar Views */}
       <div className="min-h-[500px]">
-        {loading ? (
+        {loading || scheduleLoading ? (
           <div className="flex justify-center items-center h-64 text-gray-400">
             <div className="text-center">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-accent mx-auto mb-2"></div>
@@ -229,25 +249,42 @@ export default function AdminTurnosPage() {
                 }}
               />
             )}
-            {view === 'month' && (
+            {view === 'month' && schedule && (
               <MonthView
                 currentDate={currentDate}
                 events={events}
+                schedule={schedule}
                 onDaySelect={(d) => {
                   setCurrentDate(d);
                   setView('day');
                 }}
               />
             )}
-            {view === 'day' && (
-              <CalendarContainer
-                currentDate={currentDate}
-                events={events}
-                onBookingClick={handleBookingClick}
-                onSlotClick={handleSlotClick}
-                onBlockCancel={handleBlockCancel}
-                onReschedule={handleReschedule}
-              />
+            {view === 'day' && schedule && (
+              <>
+                {!isDayEnabled(currentDate, schedule) ? (
+                  <div className="bg-white rounded-3xl shadow-soft border border-gray-100 p-8">
+                    <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+                      <AlertCircle size={48} className="mb-4 text-gray-300" />
+                      <h3 className="text-lg font-semibold text-gray-600 mb-2">Día No Habilitado</h3>
+                      <p className="text-gray-500 text-center max-w-md">
+                        Este día está configurado como cerrado en los horarios de atención.
+                        Puedes cambiar la configuración en la sección de Configuración.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <CalendarContainer
+                    currentDate={currentDate}
+                    events={events}
+                    schedule={schedule}
+                    onBookingClick={handleBookingClick}
+                    onSlotClick={handleSlotClick}
+                    onBlockCancel={handleBlockCancel}
+                    onReschedule={handleReschedule}
+                  />
+                )}
+              </>
             )}
           </>
         )}
@@ -271,6 +308,7 @@ export default function AdminTurnosPage() {
         onSubmit={handleCreateBlock}
         initialDate={currentDate}
         initialTime={selectedSlotTime}
+        schedule={schedule}
       />
 
       {/* Create Manual Booking Modal */}
@@ -280,6 +318,7 @@ export default function AdminTurnosPage() {
         onSuccess={loadEvents}
         initialDate={currentDate}
         initialTime={selectedSlotTime}
+        schedule={schedule}
       />
     </div>
   );

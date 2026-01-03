@@ -21,6 +21,8 @@ public interface ServiceRepository extends JpaRepository<ServiceEntity, Long> {
 
     List<ServiceEntity> findByIsFeaturedTrueAndIsActiveTrueOrderByCreatedAtDesc();
 
+    List<ServiceEntity> findByIsOfferTrueAndIsActiveTrueOrderByCreatedAtDesc();
+
     @Query("SELECT s FROM ServiceEntity s WHERE s.category.id = :categoryId AND s.isActive = true ORDER BY s.createdAt DESC")
     List<ServiceEntity> findByCategoryIdAndIsActiveTrue(@Param("categoryId") Long categoryId);
 }

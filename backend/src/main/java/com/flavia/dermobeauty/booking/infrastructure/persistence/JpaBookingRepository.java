@@ -28,11 +28,11 @@ public interface JpaBookingRepository extends JpaRepository<BookingEntity, Long>
     List<BookingEntity> findByBookingDateAndStatusNot(LocalDate bookingDate, BookingStatus status);
 
     // Un turno se solapa si: (StartA < EndB) y (StartB < EndA)
+    // NOTA: No filtramos por serviceId porque hay un solo recurso (Flavia) que atiende todos los servicios
     @Query(value = """
            SELECT CASE WHEN COUNT(*) > 0 THEN true ELSE false END
            FROM bookings b
-           WHERE b.service_id = :serviceId
-           AND b.booking_date = :date
+           WHERE b.booking_date = :date
            AND b.status != 'CANCELLED'
            AND (
                b.booking_time < :endTime
@@ -40,7 +40,6 @@ public interface JpaBookingRepository extends JpaRepository<BookingEntity, Long>
            )
            """, nativeQuery = true)
     boolean existsOverlappingBooking(
-            @Param("serviceId") Long serviceId,
             @Param("date") LocalDate date,
             @Param("startTime") LocalTime startTime,
             @Param("endTime") LocalTime endTime

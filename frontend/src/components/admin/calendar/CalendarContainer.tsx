@@ -2,10 +2,12 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import DayView from './DayView';
 import type { CalendarEvent, CalendarBookingEvent } from '../../../types/domain';
+import type { WeeklySchedule } from '../../../api/config';
 
 interface CalendarContainerProps {
   currentDate: Date;
   events: CalendarEvent[];
+  schedule: WeeklySchedule;
   onBookingClick?: (event: CalendarBookingEvent) => void;
   onSlotClick?: (time: string) => void;
   onBlockCancel?: (id: number) => Promise<void>;
@@ -19,6 +21,7 @@ interface CalendarContainerProps {
 export default function CalendarContainer({
   currentDate,
   events,
+  schedule,
   onBookingClick,
   onSlotClick,
   onBlockCancel,
@@ -107,6 +110,7 @@ export default function CalendarContainer({
       <DayView
         currentDate={currentDate}
         events={events}
+        schedule={schedule}
         onBookingClick={handleBookingClick}
         onSlotClick={handleSlotClick}
         onBlockCancel={handleBlockCancel}
